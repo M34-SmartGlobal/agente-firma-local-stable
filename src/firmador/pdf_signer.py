@@ -10,6 +10,7 @@ from asn1crypto import x509
 
 
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MENSAJE_IDENTIDAD_FALLIDA = (
     "Validación de identidad fallida. El DNIe insertado no pertenece al "
     "usuario que inició sesión."
@@ -55,9 +56,11 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     _validar_identidad_dnie(datos_identidad, dni_esperado)
 
     pdf_bytes = _decodificar_pdf(pdf_base64)
-    jar_path = os.path.join("motor_java", "JSignPdf.jar")
-    if not os.path.exists(jar_path):
-        raise FileNotFoundError(f"No se encontró el motor Java de firma: {jar_path}")
+    ruta_ejecutable = os.path.join(BASE_DIR, "motor_java", "JSignPdfC.exe")
+    if not os.path.exists(ruta_ejecutable):
+        raise FileNotFoundError(
+            f"No se encontró el ejecutable nativo de firma: {ruta_ejecutable}"
+        )
 
     try:
         with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
@@ -69,9 +72,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 archivo_pdf.write(pdf_bytes)
 
             comando = [
-                "java",
-                "-jar",
-                jar_path,
+                ruta_ejecutable,
                 "-kst",
                 "WINDOWS-MY",
                 "-a",
