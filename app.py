@@ -18,7 +18,7 @@ ALLOWED_ORIGINS = [
 # CRM_ORIGIN = "https://nuevo-crm-rrhh.pages.dev"
 HOST = "127.0.0.1"
 PORT = 5000
-MODO_SIMULADOR = True
+# MODO_SIMULADOR = True
 
 try:
     import customtkinter
