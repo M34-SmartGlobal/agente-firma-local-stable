@@ -22,11 +22,27 @@ MENSAJE_IDENTIDAD_FALLIDA = (
 
 
 def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
+
+    from app import MODO_SIMULADOR # Importas tu variable
+
     if not pdf_base64:
         raise ValueError("Debe enviar el PDF en Base64")
     if not pin:
         raise ValueError("Debe enviar el PIN del DNIe")
+    
+
+    # --- LÓGICA DEL SIMULADOR ---
+    if MODO_SIMULADOR:
+        if pin == "123456": # Un PIN de prueba que tú definas
+            print("SIMULADOR: Firma exitosa simulada")
+            # Aquí devuelves el mismo pdf_base64 simulando que ya se firmó
+            return {"status": "success", "pdf_base64": pdf_base64} 
+        else:
+            raise ValueError("PIN incorrecto (Modo Simulador usa 123456)")
+    # ----------------------------
+
     dni_esperado = _normalizar_dni(dni_esperado)
+    
     if not OPENSC_PKCS11_DLL.exists():
         raise FileNotFoundError("OpenSC no está instalado")
 
