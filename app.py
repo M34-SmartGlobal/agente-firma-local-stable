@@ -9,7 +9,13 @@ from src.firmador.pdf_simulator import simular_firma_pdf
 from src.firmador.pdf_signer import firmar_pdf
 
 
-CRM_ORIGIN = "https://nuevo-crm-rrhh.pages.dev"
+ALLOWED_ORIGINS = [
+    "https://nuevo-crm-rrhh.pages.dev",
+    "http://localhost:3000"
+]
+
+
+# CRM_ORIGIN = "https://nuevo-crm-rrhh.pages.dev"
 HOST = "127.0.0.1"
 PORT = 5000
 MODO_SIMULADOR = True
@@ -23,7 +29,7 @@ except ModuleNotFoundError:
 flask_app = Flask(__name__)
 CORS(
     flask_app,
-    resources={r"/*": {"origins": [CRM_ORIGIN]}},
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
     methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
