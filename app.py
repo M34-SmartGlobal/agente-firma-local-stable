@@ -158,7 +158,7 @@ class App(customtkinter.CTk if customtkinter else object):
 
     def _obtener_estado_opensc(self):
         if OPENSC_PKCS11_DLL is not None:
-            return "Lector USB: OpenSC Listo", "#22c55e"
+            return f"Lector USB: {OPENSC_PKCS11_DLL.name} Listo", "#22c55e"
         return "OpenSC: 🔴 No detectado", "#ef4444"
 
     def actualizar_estado_lector(self):

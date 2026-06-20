@@ -4,6 +4,16 @@ import PyKCS11
 
 
 OPENSC_PKCS11_RUTAS = [
+    # Middlewares Oficiales DNIe Perú (Prioridad Alta)
+    Path(r"C:\Program Files\IDEMIA\AWP\DLLs\OcsCryptoki.dll"),
+    Path(r"C:\Program Files (x86)\IDEMIA\AWP\DLLs\OcsCryptoki.dll"),
+    Path(r"C:\Program Files\Bit4Id\Universal MW\etc\bit4xpki.dll"),
+    Path(r"C:\Program Files (x86)\Bit4Id\Universal MW\etc\bit4xpki.dll"),
+    Path(r"C:\Windows\System32\bit4xpki.dll"),
+    Path(r"C:\Windows\System32\Reniec_DNIe_PKCS11.dll"),
+    Path(r"C:\Windows\System32\Reniec_DNIe_PKCS11_64.dll"),
+    Path(r"C:\Windows\System32\eTPKCS11.dll"),
+    # OpenSC Genérico (Fallback)
     Path(r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
     Path(r"C:\Program Files (x86)\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
 ]
