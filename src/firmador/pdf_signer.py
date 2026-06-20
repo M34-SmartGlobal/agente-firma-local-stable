@@ -76,6 +76,8 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 "-kst",
                 "WINDOWS-MY",
                 "-a",
+                "-ha",
+                "SHA256",
                 "-d",
                 ruta_salida_dir,
                 ruta_pdf_entrada,
@@ -88,16 +90,19 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 check=False,
             )
             if resultado.returncode != 0:
-                detalle_error = (resultado.stderr or resultado.stdout or "").strip()
                 raise RuntimeError(
-                    "JSignPdf no pudo firmar el documento"
-                    + (f": {detalle_error}" if detalle_error else "")
+                    "JSignPdf no pudo firmar el documento. "
+                    f"Código de salida: {resultado.returncode}. "
+                    f"STDERR: {(resultado.stderr or '').strip()} "
+                    f"STDOUT: {(resultado.stdout or '').strip()}"
                 )
 
             ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_signed.pdf")
             if not os.path.exists(ruta_pdf_firmado):
                 raise RuntimeError(
-                    "JSignPdf finalizó sin generar el archivo temp_in_signed.pdf"
+                    "JSignPdf finalizó sin generar el archivo temp_in_signed.pdf. "
+                    f"STDERR: {(resultado.stderr or '').strip()} "
+                    f"STDOUT: {(resultado.stdout or '').strip()}"
                 )
 
             with open(ruta_pdf_firmado, "rb") as archivo_firmado:
