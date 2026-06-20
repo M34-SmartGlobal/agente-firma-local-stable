@@ -5,12 +5,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 from src.firmador.pkcs11_handler import verificar_dnie
+from src.firmador.pdf_simulator import simular_firma_pdf
 from src.firmador.pdf_signer import firmar_pdf
 
 
 CRM_ORIGIN = "https://nuevo-crm-rrhh.pages.dev"
 HOST = "127.0.0.1"
 PORT = 5000
+MODO_SIMULADOR = True
 
 try:
     import customtkinter
@@ -39,6 +41,14 @@ def status():
 
 @flask_app.get("/api/dnie/status")
 def dnie_status():
+    if MODO_SIMULADOR:
+        return jsonify(
+            {
+                "estado": "Conectado",
+                "mensaje": "Modo simulador activo. No se requiere lector físico.",
+                "modo_simulador": True,
+            }
+        )
     return jsonify(verificar_dnie())
 
 
@@ -50,7 +60,10 @@ def dnie_firmar():
     dni_esperado = data.get("dni_esperado")
 
     try:
-        resultado = firmar_pdf(pdf_base64, pin, dni_esperado)
+        if MODO_SIMULADOR:
+            resultado = simular_firma_pdf(pdf_base64)
+        else:
+            resultado = firmar_pdf(pdf_base64, pin, dni_esperado)
         return jsonify({"status": "success", **resultado})
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
@@ -71,7 +84,7 @@ class App(customtkinter.CTk if customtkinter else object):
         super().__init__()
 
         self.title("Motor Criptográfico - MASGLOBAL")
-        self.geometry("450x380")
+        self.geometry("450x430")
         self.resizable(False, False)
         self._consulta_lector_en_progreso = False
 
@@ -113,13 +126,23 @@ class App(customtkinter.CTk if customtkinter else object):
         )
         self.label_servidor.grid(row=3, column=0, padx=24, pady=(0, 14))
 
+        self.switch_simulador = customtkinter.CTkSwitch(
+            self.contenedor,
+            text="Modo Simulador (Sin Lector)",
+            command=self.actualizar_modo_simulador,
+            font=customtkinter.CTkFont(size=13, weight="bold"),
+        )
+        self.switch_simulador.grid(row=4, column=0, padx=24, pady=(0, 16))
+        if MODO_SIMULADOR:
+            self.switch_simulador.select()
+
         self.label_lector = customtkinter.CTkLabel(
             self.contenedor,
             text="Lector USB: Buscando...",
             font=customtkinter.CTkFont(size=15, weight="bold"),
             text_color="#f59e0b",
         )
-        self.label_lector.grid(row=4, column=0, padx=24, pady=(0, 32))
+        self.label_lector.grid(row=5, column=0, padx=24, pady=(0, 28))
 
         self.boton_cerrar = customtkinter.CTkButton(
             self.contenedor,
@@ -131,7 +154,7 @@ class App(customtkinter.CTk if customtkinter else object):
             corner_radius=12,
             font=customtkinter.CTkFont(size=14, weight="bold"),
         )
-        self.boton_cerrar.grid(row=5, column=0, padx=64, pady=(0, 18), sticky="ew")
+        self.boton_cerrar.grid(row=6, column=0, padx=64, pady=(0, 18), sticky="ew")
 
         self.aviso_corporativo = customtkinter.CTkLabel(
             self.contenedor,
@@ -140,9 +163,25 @@ class App(customtkinter.CTk if customtkinter else object):
             text_color="#6b7280",
             wraplength=360,
         )
-        self.aviso_corporativo.grid(row=6, column=0, padx=24, pady=(0, 22))
+        self.aviso_corporativo.grid(row=7, column=0, padx=24, pady=(0, 22))
+
+    def actualizar_modo_simulador(self):
+        global MODO_SIMULADOR
+
+        MODO_SIMULADOR = bool(self.switch_simulador.get())
+        if MODO_SIMULADOR:
+            self._actualizar_label_lector(
+                "Lector USB: 🔵 Simulador activo (sin lector)", "#38bdf8"
+            )
 
     def actualizar_estado_lector(self):
+        if MODO_SIMULADOR:
+            self._actualizar_label_lector(
+                "Lector USB: 🔵 Simulador activo (sin lector)", "#38bdf8"
+            )
+            self.after(3000, self.actualizar_estado_lector)
+            return
+
         if not self._consulta_lector_en_progreso:
             self._consulta_lector_en_progreso = True
             threading.Thread(target=self._consultar_estado_lector, daemon=True).start()
