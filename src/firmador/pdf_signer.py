@@ -5,6 +5,7 @@ import re
 
 from asn1crypto import x509
 from endesive import pdf
+import pywintypes
 from win32.lib import win32cryptcon
 
 try:
@@ -19,6 +20,7 @@ MENSAJE_IDENTIDAD_FALLIDA = (
     "usuario que inició sesión."
 )
 CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG = 0x10000
+CRYPT_E_PENDING_CLOSE = -2146885617
 ALGORITMOS_HASH_CAPI = {
     "sha1": getattr(win32cryptcon, "CALG_SHA1", 0x00008004),
     "sha256": getattr(win32cryptcon, "CALG_SHA_256", 0x0000800C),
@@ -50,7 +52,17 @@ class WindowsCAPIRENIECHSM:
                 self.datos_identidad = datos_identidad
                 return
         finally:
-            store.CertCloseStore()
+            try:
+                store.CertCloseStore()
+            except pywintypes.error as exc:
+                if _es_error_pending_close(exc):
+                    print(
+                        "Advertencia: Windows CAPI reportó CRYPT_E_PENDING_CLOSE "
+                        "al cerrar el almacén. Se ignora porque el certificado "
+                        "sigue vivo para completar la firma."
+                    )
+                else:
+                    raise
 
         raise RuntimeError(
             "No se detectó un certificado RENIEC con llave privada en el almacén "
@@ -193,6 +205,17 @@ def _extraer_textos(valor):
 def _primer_texto(valor):
     textos = _extraer_textos(valor)
     return textos[0] if textos else None
+
+
+def _es_error_pending_close(exc: pywintypes.error) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror == CRYPT_E_PENDING_CLOSE:
+        return True
+
+    if exc.args and exc.args[0] == CRYPT_E_PENDING_CLOSE:
+        return True
+
+    return False
 
 
 def _describir_error_firma(exc: Exception) -> str:
