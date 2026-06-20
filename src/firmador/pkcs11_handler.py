@@ -31,11 +31,6 @@ def detectar_opensc_pkcs11():
 def detectar_dll_con_token():
     primera_dll_existente = None
 
-    try:
-        import pkcs11
-    except ModuleNotFoundError:
-        return detectar_opensc_pkcs11()
-
     for ruta in OPENSC_PKCS11_RUTAS:
         if not ruta.exists():
             continue
@@ -43,8 +38,9 @@ def detectar_dll_con_token():
             primera_dll_existente = ruta
 
         try:
-            lib = pkcs11.lib(str(ruta))
-            slots = list(lib.get_slots(token_present=True))
+            pkcs11 = PyKCS11.PyKCS11Lib()
+            pkcs11.load(str(ruta))
+            slots = pkcs11.getSlotList(tokenPresent=True)
             if len(slots) > 0:
                 return ruta
         except Exception:
