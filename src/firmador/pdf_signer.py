@@ -1,117 +1,117 @@
 import base64
 import binascii
+import datetime
 import re
-from io import BytesIO
-from pathlib import Path
 
 from asn1crypto import x509
-from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-from pyhanko.sign import fields, signers
-from pyhanko.stamp import TextStampStyle
+from endesive import pdf
+from win32.lib import win32cryptcon
+
+try:
+    from win32 import win32crypt
+except ImportError:
+    import win32crypt
 
 
-OPENSC_PKCS11_RUTAS = [
-    # Middlewares Oficiales DNIe Perú (Prioridad Alta)
-    Path(r"C:\Program Files\IDEMIA\AWP\DLLs\OcsCryptoki.dll"),
-    Path(r"C:\Program Files (x86)\IDEMIA\AWP\DLLs\OcsCryptoki.dll"),
-    Path(r"C:\Program Files\Bit4Id\Universal MW\etc\bit4xpki.dll"),
-    Path(r"C:\Program Files (x86)\Bit4Id\Universal MW\etc\bit4xpki.dll"),
-    Path(r"C:\Windows\System32\bit4xpki.dll"),
-    Path(r"C:\Windows\System32\Reniec_DNIe_PKCS11.dll"),
-    Path(r"C:\Windows\System32\Reniec_DNIe_PKCS11_64.dll"),
-    Path(r"C:\Windows\System32\eTPKCS11.dll"),
-    # OpenSC Genérico (Fallback)
-    Path(r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
-    Path(r"C:\Program Files (x86)\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
-]
-
-
-def detectar_opensc_pkcs11():
-    for ruta in OPENSC_PKCS11_RUTAS:
-        if ruta.exists():
-            return ruta
-    return None
-
-
-OPENSC_PKCS11_DLL = detectar_opensc_pkcs11()
-SIGNATURE_FIELD_NAME = "FirmaDNIe"
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 MENSAJE_IDENTIDAD_FALLIDA = (
     "Validación de identidad fallida. El DNIe insertado no pertenece al "
     "usuario que inició sesión."
 )
+CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG = 0x10000
+ALGORITMOS_HASH_CAPI = {
+    "sha1": getattr(win32cryptcon, "CALG_SHA1", 0x00008004),
+    "sha256": getattr(win32cryptcon, "CALG_SHA_256", 0x0000800C),
+    "sha384": getattr(win32cryptcon, "CALG_SHA_384", 0x0000800D),
+    "sha512": getattr(win32cryptcon, "CALG_SHA_512", 0x0000800E),
+}
+
+
+class WindowsCAPIRENIECHSM:
+    def __init__(self, dni_esperado: str):
+        self.certificado = None
+        self.certificado_der = None
+        self.datos_identidad = None
+        self._seleccionar_certificado_reniec(dni_esperado)
+
+    def _seleccionar_certificado_reniec(self, dni_esperado: str):
+        store = win32crypt.CertOpenSystemStore("MY", None)
+        try:
+            for certificado in store.CertEnumCertificatesInStore():
+                certificado_der = certificado.CertEncoded
+                datos_identidad = _extraer_datos_certificado(certificado_der)
+
+                if "RENIEC" not in str(datos_identidad.get("issuer", "")).upper():
+                    continue
+
+                _validar_identidad_dnie(datos_identidad, dni_esperado)
+                self.certificado = certificado
+                self.certificado_der = certificado_der
+                self.datos_identidad = datos_identidad
+                return
+        finally:
+            store.CertCloseStore()
+
+        raise RuntimeError(
+            "No se detectó un certificado RENIEC con llave privada en el almacén "
+            "Windows MY. Inserte el DNIe."
+        )
+
+    def certificate(self):
+        return 1, self.certificado_der
+
+    def sign(self, keyid, data, mech):
+        algoritmo = str(mech or "sha256").lower().replace("-", "")
+        algoritmo_capi = ALGORITMOS_HASH_CAPI.get(algoritmo)
+        if algoritmo_capi is None:
+            raise RuntimeError(f"Algoritmo de firma no soportado por MSCAPI: {mech}")
+
+        flags = (
+            win32cryptcon.CRYPT_ACQUIRE_COMPARE_KEY_FLAG
+            | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG
+        )
+        keyspec, cryptprov = self.certificado.CryptAcquireCertificatePrivateKey(flags)
+        hash_capi = cryptprov.CryptCreateHash(algoritmo_capi, None, 0)
+        hash_capi.CryptHashData(data, 0)
+        firma = hash_capi.CryptSignHash(keyspec, 0)
+        return firma[::-1]
 
 
 def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
-
     if not pdf_base64:
         raise ValueError("Debe enviar el PDF en Base64")
-    if not pin:
-        raise ValueError("Debe enviar el PIN del DNIe")
 
     dni_esperado = _normalizar_dni(dni_esperado)
-
-    if OPENSC_PKCS11_DLL is None:
-        raise FileNotFoundError(
-            "No se encontró ningún módulo PKCS#11 compatible con DNIe Perú "
-            "ni OpenSC"
-        )
-
     pdf_bytes = _decodificar_pdf(pdf_base64)
 
     try:
-        from pyhanko.sign import pkcs11 as pyhanko_pkcs11
-    except ModuleNotFoundError as exc:
-        if exc.name == "pkcs11":
-            raise RuntimeError(
-                "Falta la dependencia python-pkcs11. Ejecute pip install -r requirements.txt"
-            ) from exc
-        raise
+        hsm = WindowsCAPIRENIECHSM(dni_esperado)
+        fecha_firma = datetime.datetime.utcnow() - datetime.timedelta(hours=12)
+        metadatos_firma = {
+            "sigflags": 3,
+            "contact": "MASGLOBAL",
+            "location": "Perú",
+            "signingdate": fecha_firma.strftime("D:%Y%m%d%H%M%S+00'00'").encode(),
+            "reason": "Firma digital con DNIe vía Windows CAPI",
+            "signaturebox": (50, 50, 280, 115),
+        }
 
-    try:
-        with pyhanko_pkcs11.open_pkcs11_session(
-            str(OPENSC_PKCS11_DLL), user_pin=pin
-        ) as session:
-            credenciales = _seleccionar_credenciales_firma(session)
-            datos_identidad = credenciales.get("datos_identidad") or {}
-            _validar_identidad_dnie(datos_identidad, dni_esperado)
+        firma = pdf.cms.sign(
+            pdf_bytes,
+            metadatos_firma,
+            None,
+            None,
+            [],
+            "sha256",
+            hsm,
+        )
+        pdf_firmado = pdf_bytes + firma
 
-            signer = pyhanko_pkcs11.PKCS11Signer(
-                pkcs11_session=session,
-                cert_id=credenciales.get("cert_id"),
-                key_id=credenciales.get("key_id"),
-                cert_label=credenciales.get("cert_label"),
-                key_label=credenciales.get("key_label"),
-                other_certs_to_pull=None,
-            )
-
-            pdf_writer = IncrementalPdfFileWriter(BytesIO(pdf_bytes))
-            output = BytesIO()
-
-            pdf_signer = signers.PdfSigner(
-                signers.PdfSignatureMetadata(
-                    field_name=SIGNATURE_FIELD_NAME,
-                    md_algorithm="sha256",
-                    subfilter=fields.SigSeedSubFilter.PADES,
-                    reason="Firma digital con DNIe",
-                ),
-                signer=signer,
-                stamp_style=TextStampStyle(
-                    stamp_text="Firmado digitalmente con DNIe\n%(ts)s"
-                ),
-                new_field_spec=fields.SigFieldSpec(
-                    sig_field_name=SIGNATURE_FIELD_NAME,
-                    on_page=0,
-                    box=(50, 50, 280, 115),
-                ),
-            )
-            firmado = pdf_signer.sign_pdf(pdf_writer, output=output)
-
-            return {
-                "pdf_firmado": base64.b64encode(firmado.getvalue()).decode("ascii"),
-                "dni_extraido": datos_identidad.get("dni"),
-                "nombre_firmante": datos_identidad.get("nombre_firmante"),
-            }
+        return {
+            "pdf_firmado": base64.b64encode(pdf_firmado).decode("ascii"),
+            "dni_extraido": hsm.datos_identidad.get("dni"),
+            "nombre_firmante": hsm.datos_identidad.get("nombre_firmante"),
+        }
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
 
@@ -128,77 +128,13 @@ def _decodificar_pdf(pdf_base64: str) -> bytes:
     return pdf_bytes
 
 
-def _seleccionar_credenciales_firma(session):
-    from pkcs11 import Attribute, ObjectClass
-
-    certificados = list(
-        session.get_objects({Attribute.CLASS: ObjectClass.CERTIFICATE})
-    )
-    if not certificados:
-        raise RuntimeError("No se encontró ningún certificado en el DNIe")
-
-    candidatos = sorted(
-        (_credencial_desde_certificado(certificado) for certificado in certificados),
-        key=_prioridad_certificado_firma,
-    )
-
-    ultimo_error = None
-    for credencial in candidatos:
-        intentos = []
-        if credencial.get("cert_id") is not None:
-            intentos.append({"id": credencial["cert_id"]})
-        if credencial.get("cert_label") is not None:
-            intentos.append({"label": credencial["cert_label"]})
-
-        for intento in intentos:
-            try:
-                session.get_key(ObjectClass.PRIVATE_KEY, **intento)
-                if "id" in intento:
-                    return {
-                        "cert_id": credencial["cert_id"],
-                        "key_id": credencial["cert_id"],
-                        "datos_identidad": credencial["datos_identidad"],
-                    }
-                return {
-                    "cert_label": credencial["cert_label"],
-                    "key_label": credencial["cert_label"],
-                    "datos_identidad": credencial["datos_identidad"],
-                }
-            except Exception as exc:
-                ultimo_error = exc
-
-    raise RuntimeError(
-        "No se encontró una llave privada asociada al certificado de firma"
-    ) from ultimo_error
-
-
-def _credencial_desde_certificado(certificado):
-    from pkcs11 import Attribute
-
-    cert_id = _leer_atributo_pkcs11(certificado, Attribute.ID)
-    cert_label = _leer_atributo_pkcs11(certificado, Attribute.LABEL)
-    if isinstance(cert_label, bytes):
-        cert_label = cert_label.decode("utf-8", errors="ignore")
-    return {
-        "cert_id": cert_id,
-        "cert_label": cert_label,
-        "datos_identidad": _extraer_datos_certificado(certificado),
-    }
-
-
-def _extraer_datos_certificado(certificado):
-    from pkcs11 import Attribute
-
-    certificado_der = _leer_atributo_pkcs11(certificado, Attribute.VALUE)
-    if not certificado_der:
-        return {"dni": None, "nombre_firmante": None, "subject": None}
-
+def _extraer_datos_certificado(certificado_der):
     certificado_x509 = x509.Certificate.load(certificado_der)
     subject = certificado_x509.subject
     subject_native = subject.native or {}
-    nombre_firmante = _primer_texto(subject_native.get("common_name"))
-    subject_legible = subject.human_friendly
+    issuer = certificado_x509.issuer.native or {}
 
+    nombre_firmante = _primer_texto(subject_native.get("common_name"))
     textos_prioritarios = [
         subject_native.get("serial_number"),
         subject_native.get("common_name"),
@@ -210,7 +146,8 @@ def _extraer_datos_certificado(certificado):
     return {
         "dni": dni,
         "nombre_firmante": nombre_firmante,
-        "subject": subject_legible,
+        "subject": subject.human_friendly,
+        "issuer": issuer,
     }
 
 
@@ -225,8 +162,8 @@ def _validar_identidad_dnie(datos_identidad: dict, dni_esperado: str):
     dni_extraido = datos_identidad.get("dni")
     if dni_extraido and dni_extraido != dni_esperado:
         raise PermissionError(MENSAJE_IDENTIDAD_FALLIDA)
-    if not dni_extraido and not datos_identidad.get("nombre_firmante"):
-        raise RuntimeError("No se pudo extraer identidad del certificado del DNIe")
+    if not dni_extraido:
+        raise RuntimeError("No se pudo extraer el DNI del certificado RENIEC")
 
 
 def _buscar_dni(textos) -> str | None:
@@ -258,32 +195,17 @@ def _primer_texto(valor):
     return textos[0] if textos else None
 
 
-def _prioridad_certificado_firma(credencial):
-    label = (credencial.get("cert_label") or "").lower()
-    palabras_clave = ("firma", "sign", "signature", "non repudiation", "repudio")
-    return 0 if any(palabra in label for palabra in palabras_clave) else 1
-
-
-def _leer_atributo_pkcs11(objeto, atributo):
-    try:
-        return objeto[atributo]
-    except Exception:
-        return None
-
-
 def _describir_error_firma(exc: Exception) -> str:
     mensaje = str(exc)
     mensaje_mayusculas = mensaje.upper()
 
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
-    if "CKR_PIN_INCORRECT" in mensaje_mayusculas or "PIN_INCORRECT" in mensaje_mayusculas:
-        return "PIN incorrecto"
-    if "CKR_PIN_LOCKED" in mensaje_mayusculas or "PIN_LOCKED" in mensaje_mayusculas:
-        return "PIN bloqueado. Revise el estado del DNIe"
-    if "NO TOKEN FOUND" in mensaje_mayusculas or "TOKEN_NOT_PRESENT" in mensaje_mayusculas:
+    if "SCARD" in mensaje_mayusculas or "SMART CARD" in mensaje_mayusculas:
         return "DNIe no insertado o lector no detectado"
-    if "OPENSC NO ESTÁ INSTALADO" in mensaje_mayusculas:
-        return "OpenSC no está instalado"
+    if "PIN" in mensaje_mayusculas:
+        return "PIN incorrecto o cancelado por el usuario"
+    if "WINDOWS CAPI" in mensaje_mayusculas or "MSCAPI" in mensaje_mayusculas:
+        return mensaje
 
     return mensaje or "No se pudo firmar el PDF"
