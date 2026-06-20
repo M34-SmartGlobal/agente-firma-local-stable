@@ -4,11 +4,7 @@ import threading
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from src.firmador.pkcs11_handler import (
-    OPENSC_PKCS11_DLL,
-    leer_certificado_dnie,
-    verificar_dnie,
-)
+from src.firmador import pkcs11_handler
 from src.firmador.pdf_signer import firmar_pdf
 
 
@@ -48,13 +44,13 @@ def status():
 
 @flask_app.get("/api/dnie/status")
 def dnie_status():
-    return jsonify(verificar_dnie())
+    return jsonify(pkcs11_handler.verificar_dnie())
 
 
 @flask_app.get("/api/dnie/leer-certificado")
 def dnie_leer_certificado():
     try:
-        return jsonify(leer_certificado_dnie())
+        return jsonify(pkcs11_handler.leer_certificado_dnie(recargar_driver=True))
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
 
@@ -181,8 +177,9 @@ class App(customtkinter.CTk if customtkinter else object):
         self.aviso_corporativo.grid(row=8, column=0, padx=24, pady=(0, 22))
 
     def _obtener_estado_opensc(self):
-        if OPENSC_PKCS11_DLL is not None:
-            return f"Lector USB: {OPENSC_PKCS11_DLL.name} Listo", "#22c55e"
+        if pkcs11_handler.OPENSC_PKCS11_DLL is not None:
+            nombre_dll = pkcs11_handler.OPENSC_PKCS11_DLL.name
+            return f"Lector USB: {nombre_dll} Listo", "#22c55e"
         return "OpenSC: 🔴 No detectado", "#ef4444"
 
     def actualizar_estado_lector(self):
@@ -190,6 +187,7 @@ class App(customtkinter.CTk if customtkinter else object):
         self.after(3000, self.actualizar_estado_lector)
 
     def actualizar_lector_manual(self):
+        pkcs11_handler.refrescar_dll_con_token()
         texto_opensc, color_opensc = self._obtener_estado_opensc()
         self.label_opensc.configure(text=texto_opensc, text_color=color_opensc)
         self._iniciar_consulta_lector()
@@ -202,7 +200,7 @@ class App(customtkinter.CTk if customtkinter else object):
 
     def _consultar_estado_lector(self):
         try:
-            resultado = verificar_dnie()
+            resultado = pkcs11_handler.verificar_dnie()
             estado = resultado.get("estado", "Error")
 
             if estado == "Conectado":
