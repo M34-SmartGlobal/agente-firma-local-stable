@@ -1,6 +1,8 @@
+import re
 from pathlib import Path
 
 import PyKCS11
+from asn1crypto import x509
 
 
 OPENSC_PKCS11_RUTAS = [
@@ -27,12 +29,15 @@ def detectar_opensc_pkcs11():
 
 
 OPENSC_PKCS11_DLL = detectar_opensc_pkcs11()
+PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 
 
 def verificar_dnie():
     try:
         if OPENSC_PKCS11_DLL is None:
-            raise FileNotFoundError("OpenSC no está instalado")
+            raise FileNotFoundError(
+                "No se encontró ningún módulo PKCS#11 compatible"
+            )
 
         pkcs11 = PyKCS11.PyKCS11Lib()
         pkcs11.load(str(OPENSC_PKCS11_DLL))
@@ -52,3 +57,95 @@ def verificar_dnie():
         return {"estado": "Error", "mensaje": f"Error PKCS#11: {exc}"}
     except Exception as exc:
         return {"estado": "Error", "mensaje": f"Error al verificar DNIe: {exc}"}
+
+
+def leer_certificado_dnie():
+    if OPENSC_PKCS11_DLL is None:
+        raise FileNotFoundError("No se encontró ningún módulo PKCS#11 compatible")
+
+    pkcs11 = PyKCS11.PyKCS11Lib()
+    pkcs11.load(str(OPENSC_PKCS11_DLL))
+
+    slots = pkcs11.getSlotList(tokenPresent=True)
+    if not slots:
+        raise RuntimeError("No se detectó ninguna tarjeta DNIe insertada")
+
+    ultimo_error = None
+    for slot in slots:
+        session = None
+        try:
+            session = pkcs11.openSession(slot)
+            certificados = session.findObjects(
+                [(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)]
+            )
+            for certificado in certificados:
+                try:
+                    certificado_der = _leer_certificado_der(session, certificado)
+                    if not certificado_der:
+                        continue
+
+                    datos = _extraer_identidad_certificado(certificado_der)
+                    if datos.get("nombre") or datos.get("dni"):
+                        return datos
+                except Exception as exc:
+                    ultimo_error = exc
+        except Exception as exc:
+            ultimo_error = exc
+        finally:
+            if session is not None:
+                session.closeSession()
+
+    raise RuntimeError("No se pudo leer el certificado del DNIe") from ultimo_error
+
+
+def _leer_certificado_der(session, certificado):
+    valor = session.getAttributeValue(
+        certificado, [PyKCS11.CKA_VALUE], allAsBinary=True
+    )[0]
+    if isinstance(valor, bytes):
+        return valor
+    if isinstance(valor, bytearray):
+        return bytes(valor)
+    if isinstance(valor, (list, tuple)):
+        return bytes(valor)
+    return None
+
+
+def _extraer_identidad_certificado(certificado_der):
+    certificado_x509 = x509.Certificate.load(certificado_der)
+    subject_native = certificado_x509.subject.native or {}
+
+    nombre = _primer_texto(subject_native.get("common_name"))
+    serial = _primer_texto(subject_native.get("serial_number"))
+    dni = _extraer_dni(serial) or serial
+
+    return {
+        "status": "ok",
+        "nombre": nombre or "",
+        "dni": dni or "",
+    }
+
+
+def _extraer_dni(texto):
+    if not texto:
+        return None
+    coincidencia = PATRON_DNI.search(str(texto))
+    return coincidencia.group(1) if coincidencia else None
+
+
+def _primer_texto(valor):
+    if valor is None:
+        return None
+    if isinstance(valor, (list, tuple, set)):
+        for item in valor:
+            texto = _primer_texto(item)
+            if texto:
+                return texto
+        return None
+    if isinstance(valor, dict):
+        for item in valor.values():
+            texto = _primer_texto(item)
+            if texto:
+                return texto
+        return None
+    return str(valor)

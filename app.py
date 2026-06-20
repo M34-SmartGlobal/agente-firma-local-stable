@@ -4,7 +4,11 @@ import threading
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from src.firmador.pkcs11_handler import OPENSC_PKCS11_DLL, verificar_dnie
+from src.firmador.pkcs11_handler import (
+    OPENSC_PKCS11_DLL,
+    leer_certificado_dnie,
+    verificar_dnie,
+)
 from src.firmador.pdf_signer import firmar_pdf
 
 
@@ -47,6 +51,14 @@ def dnie_status():
     return jsonify(verificar_dnie())
 
 
+@flask_app.get("/api/dnie/leer-certificado")
+def dnie_leer_certificado():
+    try:
+        return jsonify(leer_certificado_dnie())
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+
 @flask_app.post("/api/dnie/firmar")
 def dnie_firmar():
     data = request.get_json(silent=True) or {}
@@ -76,7 +88,7 @@ class App(customtkinter.CTk if customtkinter else object):
         super().__init__()
 
         self.title("Motor Criptográfico - MASGLOBAL")
-        self.geometry("450x430")
+        self.geometry("450x480")
         self.resizable(False, False)
         self._consulta_lector_en_progreso = False
 
@@ -135,6 +147,18 @@ class App(customtkinter.CTk if customtkinter else object):
         )
         self.label_lector.grid(row=5, column=0, padx=24, pady=(0, 28))
 
+        self.boton_actualizar = customtkinter.CTkButton(
+            self.contenedor,
+            text="Actualizar Lector",
+            command=self.actualizar_lector_manual,
+            fg_color="#1d4ed8",
+            hover_color="#1e40af",
+            height=42,
+            corner_radius=12,
+            font=customtkinter.CTkFont(size=14, weight="bold"),
+        )
+        self.boton_actualizar.grid(row=6, column=0, padx=64, pady=(0, 12), sticky="ew")
+
         self.boton_cerrar = customtkinter.CTkButton(
             self.contenedor,
             text="Cerrar Sistema",
@@ -145,7 +169,7 @@ class App(customtkinter.CTk if customtkinter else object):
             corner_radius=12,
             font=customtkinter.CTkFont(size=14, weight="bold"),
         )
-        self.boton_cerrar.grid(row=6, column=0, padx=64, pady=(0, 18), sticky="ew")
+        self.boton_cerrar.grid(row=7, column=0, padx=64, pady=(0, 18), sticky="ew")
 
         self.aviso_corporativo = customtkinter.CTkLabel(
             self.contenedor,
@@ -154,7 +178,7 @@ class App(customtkinter.CTk if customtkinter else object):
             text_color="#6b7280",
             wraplength=360,
         )
-        self.aviso_corporativo.grid(row=7, column=0, padx=24, pady=(0, 22))
+        self.aviso_corporativo.grid(row=8, column=0, padx=24, pady=(0, 22))
 
     def _obtener_estado_opensc(self):
         if OPENSC_PKCS11_DLL is not None:
@@ -162,11 +186,19 @@ class App(customtkinter.CTk if customtkinter else object):
         return "OpenSC: 🔴 No detectado", "#ef4444"
 
     def actualizar_estado_lector(self):
+        self._iniciar_consulta_lector()
+        self.after(3000, self.actualizar_estado_lector)
+
+    def actualizar_lector_manual(self):
+        texto_opensc, color_opensc = self._obtener_estado_opensc()
+        self.label_opensc.configure(text=texto_opensc, text_color=color_opensc)
+        self._iniciar_consulta_lector()
+
+    def _iniciar_consulta_lector(self):
         if not self._consulta_lector_en_progreso:
             self._consulta_lector_en_progreso = True
+            self._actualizar_label_lector("Lector USB: Buscando...", "#f59e0b")
             threading.Thread(target=self._consultar_estado_lector, daemon=True).start()
-
-        self.after(3000, self.actualizar_estado_lector)
 
     def _consultar_estado_lector(self):
         try:
