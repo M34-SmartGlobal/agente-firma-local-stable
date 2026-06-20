@@ -21,42 +21,62 @@ OPENSC_PKCS11_RUTAS = [
 ]
 
 
-def detectar_opensc_pkcs11():
-    for ruta in OPENSC_PKCS11_RUTAS:
-        if ruta.exists():
-            return ruta
-    return None
+def _registrar_log(log_callback, mensaje):
+    if log_callback is not None:
+        log_callback(mensaje)
+    else:
+        print(mensaje)
 
 
-def detectar_dll_con_token():
+def detectar_dll_con_token(log_callback=None):
+    global ULTIMO_ESCANEO_TOKEN_DETECTADO
+
     primera_dll_existente = None
+    ULTIMO_ESCANEO_TOKEN_DETECTADO = False
+    _registrar_log(log_callback, "\n--- INICIANDO ESCANEO DE DRIVERS PKCS#11 ---")
 
     for ruta in OPENSC_PKCS11_RUTAS:
         if not ruta.exists():
             continue
+
         if primera_dll_existente is None:
             primera_dll_existente = ruta
 
         try:
+            _registrar_log(log_callback, f"Probando: {ruta.name}...")
             pkcs11 = PyKCS11.PyKCS11Lib()
             pkcs11.load(str(ruta))
             slots = pkcs11.getSlotList(tokenPresent=True)
+
             if len(slots) > 0:
+                ULTIMO_ESCANEO_TOKEN_DETECTADO = True
+                _registrar_log(
+                    log_callback,
+                    f"✅ ÉXITO: Tarjeta detectada en slot usando {ruta.name}",
+                )
                 return ruta
-        except Exception:
+            else:
+                _registrar_log(
+                    log_callback,
+                    f"⚠️ Cargado, pero no hay token en {ruta.name}",
+                )
+        except Exception as e:
+            _registrar_log(log_callback, f"❌ Error con {ruta.name}: {str(e)}")
             continue
 
+    _registrar_log(log_callback, "--- FIN DEL ESCANEO (SIN ÉXITO) ---\n")
     return primera_dll_existente
 
 
-def refrescar_dll_con_token():
+def refrescar_dll_con_token(log_callback=None):
     global OPENSC_PKCS11_DLL
 
-    OPENSC_PKCS11_DLL = detectar_dll_con_token()
+    OPENSC_PKCS11_DLL = detectar_dll_con_token(log_callback=log_callback)
     return OPENSC_PKCS11_DLL
 
 
-OPENSC_PKCS11_DLL = detectar_dll_con_token()
+OPENSC_PKCS11_DLL = None
+ULTIMO_ESCANEO_TOKEN_DETECTADO = False
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 
 
@@ -87,9 +107,9 @@ def verificar_dnie():
         return {"estado": "Error", "mensaje": f"Error al verificar DNIe: {exc}"}
 
 
-def leer_certificado_dnie(recargar_driver=False):
+def leer_certificado_dnie(recargar_driver=False, log_callback=None):
     if recargar_driver:
-        refrescar_dll_con_token()
+        refrescar_dll_con_token(log_callback=log_callback)
 
     if OPENSC_PKCS11_DLL is None:
         raise FileNotFoundError("No se encontró ningún módulo PKCS#11 compatible")

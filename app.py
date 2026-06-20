@@ -1,4 +1,5 @@
 import os
+import queue
 import threading
 
 from flask import Flask, jsonify, request
@@ -84,11 +85,14 @@ class App(customtkinter.CTk if customtkinter else object):
         super().__init__()
 
         self.title("Motor Criptográfico - MASGLOBAL")
-        self.geometry("450x480")
+        self.geometry("520x660")
         self.resizable(False, False)
         self._consulta_lector_en_progreso = False
+        self._escaneo_hardware_en_progreso = False
+        self.cola_consola = queue.Queue()
 
         self._configurar_layout()
+        self.after(100, self._procesar_cola_consola)
         self.actualizar_estado_lector()
 
     def _configurar_layout(self):
@@ -176,10 +180,34 @@ class App(customtkinter.CTk if customtkinter else object):
         )
         self.aviso_corporativo.grid(row=8, column=0, padx=24, pady=(0, 22))
 
+        self.label_consola = customtkinter.CTkLabel(
+            self.contenedor,
+            text="Consola PKCS#11",
+            font=customtkinter.CTkFont(size=12, weight="bold"),
+            text_color="#22c55e",
+        )
+        self.label_consola.grid(row=9, column=0, padx=24, pady=(0, 6), sticky="w")
+
+        self.consola = customtkinter.CTkTextbox(
+            self.contenedor,
+            height=120,
+            fg_color="#020617",
+            text_color="#22c55e",
+            border_color="#14532d",
+            border_width=1,
+            font=("Consolas", 11),
+            wrap="word",
+        )
+        self.consola.grid(row=10, column=0, padx=24, pady=(0, 22), sticky="ew")
+        self.consola.insert("end", "[PKCS#11] Consola lista. Use 'Actualizar Lector'.\n")
+        self.consola.configure(state="disabled")
+
     def _obtener_estado_opensc(self):
         if pkcs11_handler.OPENSC_PKCS11_DLL is not None:
             nombre_dll = pkcs11_handler.OPENSC_PKCS11_DLL.name
-            return f"Lector USB: {nombre_dll} Listo", "#22c55e"
+            if pkcs11_handler.ULTIMO_ESCANEO_TOKEN_DETECTADO:
+                return f"Lector USB: {nombre_dll} Listo", "#22c55e"
+            return f"Lector USB: {nombre_dll} sin token", "#f59e0b"
         return "OpenSC: 🔴 No detectado", "#ef4444"
 
     def actualizar_estado_lector(self):
@@ -187,12 +215,53 @@ class App(customtkinter.CTk if customtkinter else object):
         self.after(3000, self.actualizar_estado_lector)
 
     def actualizar_lector_manual(self):
-        pkcs11_handler.refrescar_dll_con_token()
+        if self._escaneo_hardware_en_progreso:
+            self.escribir_en_consola("Escaneo ya en progreso. Espere...")
+            return
+
+        self._escaneo_hardware_en_progreso = True
+        self.boton_actualizar.configure(state="disabled")
+        self._actualizar_label_lector("Lector USB: ⏳ Escaneando hardware...", "#f59e0b")
+        self.escribir_en_consola("Escaneo manual solicitado desde la interfaz.")
+
+        threading.Thread(target=self._tarea_escaneo_hardware, daemon=True).start()
+
+    def _tarea_escaneo_hardware(self):
+        try:
+            resultado = pkcs11_handler.refrescar_dll_con_token(
+                log_callback=self.escribir_en_consola
+            )
+        except Exception as exc:
+            self.escribir_en_consola(f"Error inesperado durante el escaneo: {exc}")
+            resultado = None
+
+        self.after(0, self._finalizar_escaneo_hardware, resultado)
+
+    def _finalizar_escaneo_hardware(self, ruta_detectada):
+        self._escaneo_hardware_en_progreso = False
+        self.boton_actualizar.configure(state="normal")
+
         texto_opensc, color_opensc = self._obtener_estado_opensc()
         self.label_opensc.configure(text=texto_opensc, text_color=color_opensc)
-        self._iniciar_consulta_lector()
+
+        if ruta_detectada is None:
+            self._actualizar_label_lector("Lector USB: 🔴 Sin driver PKCS#11", "#ef4444")
+            return
+
+        if pkcs11_handler.ULTIMO_ESCANEO_TOKEN_DETECTADO:
+            self._actualizar_label_lector(
+                f"Lector USB: 🟢 Token detectado con {ruta_detectada.name}", "#22c55e"
+            )
+            return
+
+        self._actualizar_label_lector(
+            f"Lector USB: 🔴 Sin token detectado ({ruta_detectada.name})", "#ef4444"
+        )
 
     def _iniciar_consulta_lector(self):
+        if self._escaneo_hardware_en_progreso:
+            return
+
         if not self._consulta_lector_en_progreso:
             self._consulta_lector_en_progreso = True
             self._actualizar_label_lector("Lector USB: Buscando...", "#f59e0b")
@@ -219,6 +288,19 @@ class App(customtkinter.CTk if customtkinter else object):
 
     def _actualizar_label_lector(self, texto, color):
         self.label_lector.configure(text=texto, text_color=color)
+
+    def escribir_en_consola(self, mensaje):
+        self.cola_consola.put(str(mensaje))
+
+    def _procesar_cola_consola(self):
+        while not self.cola_consola.empty():
+            mensaje = self.cola_consola.get_nowait()
+            self.consola.configure(state="normal")
+            self.consola.insert("end", f"{mensaje}\n")
+            self.consola.see("end")
+            self.consola.configure(state="disabled")
+
+        self.after(100, self._procesar_cola_consola)
 
     def cerrar_sistema(self):
         self.destroy()
