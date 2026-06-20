@@ -4,8 +4,7 @@ import threading
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from src.firmador.pkcs11_handler import verificar_dnie
-from src.firmador.pdf_simulator import simular_firma_pdf
+from src.firmador.pkcs11_handler import OPENSC_PKCS11_DLL, verificar_dnie
 from src.firmador.pdf_signer import firmar_pdf
 
 
@@ -18,8 +17,6 @@ ALLOWED_ORIGINS = [
 # CRM_ORIGIN = "https://nuevo-crm-rrhh.pages.dev"
 HOST = "127.0.0.1"
 PORT = 5000
-# MODO_SIMULADOR = True
-
 try:
     import customtkinter
 except ModuleNotFoundError:
@@ -47,14 +44,6 @@ def status():
 
 @flask_app.get("/api/dnie/status")
 def dnie_status():
-    if MODO_SIMULADOR:
-        return jsonify(
-            {
-                "estado": "Conectado",
-                "mensaje": "Modo simulador activo. No se requiere lector físico.",
-                "modo_simulador": True,
-            }
-        )
     return jsonify(verificar_dnie())
 
 
@@ -66,10 +55,7 @@ def dnie_firmar():
     dni_esperado = data.get("dni_esperado")
 
     try:
-        if MODO_SIMULADOR:
-            resultado = simular_firma_pdf(pdf_base64)
-        else:
-            resultado = firmar_pdf(pdf_base64, pin, dni_esperado)
+        resultado = firmar_pdf(pdf_base64, pin, dni_esperado)
         return jsonify({"status": "success", **resultado})
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
@@ -132,15 +118,14 @@ class App(customtkinter.CTk if customtkinter else object):
         )
         self.label_servidor.grid(row=3, column=0, padx=24, pady=(0, 14))
 
-        self.switch_simulador = customtkinter.CTkSwitch(
+        texto_opensc, color_opensc = self._obtener_estado_opensc()
+        self.label_opensc = customtkinter.CTkLabel(
             self.contenedor,
-            text="Modo Simulador (Sin Lector)",
-            command=self.actualizar_modo_simulador,
-            font=customtkinter.CTkFont(size=13, weight="bold"),
+            text=texto_opensc,
+            font=customtkinter.CTkFont(size=15, weight="bold"),
+            text_color=color_opensc,
         )
-        self.switch_simulador.grid(row=4, column=0, padx=24, pady=(0, 16))
-        if MODO_SIMULADOR:
-            self.switch_simulador.select()
+        self.label_opensc.grid(row=4, column=0, padx=24, pady=(0, 14))
 
         self.label_lector = customtkinter.CTkLabel(
             self.contenedor,
@@ -171,23 +156,12 @@ class App(customtkinter.CTk if customtkinter else object):
         )
         self.aviso_corporativo.grid(row=7, column=0, padx=24, pady=(0, 22))
 
-    def actualizar_modo_simulador(self):
-        global MODO_SIMULADOR
-
-        MODO_SIMULADOR = bool(self.switch_simulador.get())
-        if MODO_SIMULADOR:
-            self._actualizar_label_lector(
-                "Lector USB: 🔵 Simulador activo (sin lector)", "#38bdf8"
-            )
+    def _obtener_estado_opensc(self):
+        if OPENSC_PKCS11_DLL is not None:
+            return "Lector USB: OpenSC Listo", "#22c55e"
+        return "OpenSC: 🔴 No detectado", "#ef4444"
 
     def actualizar_estado_lector(self):
-        if MODO_SIMULADOR:
-            self._actualizar_label_lector(
-                "Lector USB: 🔵 Simulador activo (sin lector)", "#38bdf8"
-            )
-            self.after(3000, self.actualizar_estado_lector)
-            return
-
         if not self._consulta_lector_en_progreso:
             self._consulta_lector_en_progreso = True
             threading.Thread(target=self._consultar_estado_lector, daemon=True).start()

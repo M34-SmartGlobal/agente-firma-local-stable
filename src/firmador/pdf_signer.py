@@ -10,9 +10,20 @@ from pyhanko.sign import fields, signers
 from pyhanko.stamp import TextStampStyle
 
 
-OPENSC_PKCS11_DLL = Path(
-    r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"
-)
+OPENSC_PKCS11_RUTAS = [
+    Path(r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
+    Path(r"C:\Program Files (x86)\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"),
+]
+
+
+def detectar_opensc_pkcs11():
+    for ruta in OPENSC_PKCS11_RUTAS:
+        if ruta.exists():
+            return ruta
+    return None
+
+
+OPENSC_PKCS11_DLL = detectar_opensc_pkcs11()
 SIGNATURE_FIELD_NAME = "FirmaDNIe"
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 MENSAJE_IDENTIDAD_FALLIDA = (
@@ -30,8 +41,11 @@ def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
     dni_esperado = _normalizar_dni(dni_esperado)
 
-    if not OPENSC_PKCS11_DLL.exists():
-        raise FileNotFoundError("OpenSC no está instalado")
+    if OPENSC_PKCS11_DLL is None:
+        raise FileNotFoundError(
+            "OpenSC no está instalado o no se encontró el módulo PKCS#11 en "
+            "Program Files ni Program Files (x86)"
+        )
 
     pdf_bytes = _decodificar_pdf(pdf_base64)
 
