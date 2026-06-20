@@ -1,17 +1,12 @@
 import base64
 import binascii
-import datetime
+import os
 import re
+import ssl
+import subprocess
+import tempfile
 
 from asn1crypto import x509
-from endesive import pdf
-import pywintypes
-from win32.lib import win32cryptcon
-
-try:
-    from win32 import win32crypt
-except ImportError:
-    import win32crypt
 
 
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
@@ -19,110 +14,98 @@ MENSAJE_IDENTIDAD_FALLIDA = (
     "Validación de identidad fallida. El DNIe insertado no pertenece al "
     "usuario que inició sesión."
 )
-CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG = 0x10000
-CRYPT_E_PENDING_CLOSE = -2146885617
-ALGORITMOS_HASH_CAPI = {
-    "sha1": getattr(win32cryptcon, "CALG_SHA1", 0x00008004),
-    "sha256": getattr(win32cryptcon, "CALG_SHA_256", 0x0000800C),
-    "sha384": getattr(win32cryptcon, "CALG_SHA_384", 0x0000800D),
-    "sha512": getattr(win32cryptcon, "CALG_SHA_512", 0x0000800E),
-}
 
 
-class WindowsCAPIRENIECHSM:
-    def __init__(self, dni_esperado: str):
-        self.certificado = None
-        self.certificado_der = None
-        self.datos_identidad = None
-        self._seleccionar_certificado_reniec(dni_esperado)
+def leer_certificado_dnie() -> dict:
+    try:
+        certificados = ssl.enum_certificates("MY")
+    except Exception as exc:
+        raise RuntimeError(f"Error al acceder a Windows CAPI: {str(exc)}") from exc
 
-    def _seleccionar_certificado_reniec(self, dni_esperado: str):
-        store = win32crypt.CertOpenSystemStore("MY", None)
-        try:
-            for certificado in store.CertEnumCertificatesInStore():
-                certificado_der = certificado.CertEncoded
-                datos_identidad = _extraer_datos_certificado(certificado_der)
+    for cert_bytes, encoding, trust in certificados:
+        if encoding != "x509_asn":
+            continue
 
-                if "RENIEC" not in str(datos_identidad.get("issuer", "")).upper():
-                    continue
+        cert = x509.Certificate.load(cert_bytes)
+        issuer = cert.issuer.native
 
-                _validar_identidad_dnie(datos_identidad, dni_esperado)
-                self.certificado = certificado
-                self.certificado_der = certificado_der
-                self.datos_identidad = datos_identidad
-                return
-        finally:
-            try:
-                store.CertCloseStore()
-            except pywintypes.error as exc:
-                if _es_error_pending_close(exc):
-                    print(
-                        "Advertencia: Windows CAPI reportó CRYPT_E_PENDING_CLOSE "
-                        "al cerrar el almacén. Se ignora porque el certificado "
-                        "sigue vivo para completar la firma."
-                    )
-                else:
-                    raise
+        if "RENIEC" in str(issuer).upper():
+            subject = cert.subject.native
+            return {
+                "nombre": _primer_texto(subject.get("common_name")),
+                "dni": _normalizar_dni_certificado(subject.get("serial_number")),
+            }
 
-        raise RuntimeError(
-            "No se detectó un certificado RENIEC con llave privada en el almacén "
-            "Windows MY. Inserte el DNIe."
-        )
-
-    def certificate(self):
-        return 1, self.certificado_der
-
-    def sign(self, keyid, data, mech):
-        algoritmo = str(mech or "sha256").lower().replace("-", "")
-        algoritmo_capi = ALGORITMOS_HASH_CAPI.get(algoritmo)
-        if algoritmo_capi is None:
-            raise RuntimeError(f"Algoritmo de firma no soportado por MSCAPI: {mech}")
-
-        flags = (
-            win32cryptcon.CRYPT_ACQUIRE_COMPARE_KEY_FLAG
-            | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG
-        )
-        keyspec, cryptprov = self.certificado.CryptAcquireCertificatePrivateKey(flags)
-        hash_capi = cryptprov.CryptCreateHash(algoritmo_capi, None, 0)
-        hash_capi.CryptHashData(data, 0)
-        firma = hash_capi.CryptSignHash(keyspec, 0)
-        return firma[::-1]
+    raise RuntimeError(
+        "No se detectó el certificado de la RENIEC en el almacén de Windows. "
+        "Inserte el DNIe."
+    )
 
 
 def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
+    return firmar_documento(pdf_base64, pin, dni_esperado)
+
+
+def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     if not pdf_base64:
         raise ValueError("Debe enviar el PDF en Base64")
 
     dni_esperado = _normalizar_dni(dni_esperado)
+    datos_identidad = leer_certificado_dnie()
+    _validar_identidad_dnie(datos_identidad, dni_esperado)
+
     pdf_bytes = _decodificar_pdf(pdf_base64)
+    jar_path = os.path.join("motor_java", "JSignPdf.jar")
+    if not os.path.exists(jar_path):
+        raise FileNotFoundError(f"No se encontró el motor Java de firma: {jar_path}")
 
     try:
-        hsm = WindowsCAPIRENIECHSM(dni_esperado)
-        fecha_firma = datetime.datetime.utcnow() - datetime.timedelta(hours=12)
-        metadatos_firma = {
-            "sigflags": 3,
-            "contact": "MASGLOBAL",
-            "location": "Perú",
-            "signingdate": fecha_firma.strftime("D:%Y%m%d%H%M%S+00'00'").encode(),
-            "reason": "Firma digital con DNIe vía Windows CAPI",
-            "signaturebox": (50, 50, 280, 115),
-        }
+        with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
+            ruta_pdf_entrada = os.path.join(temp_dir, "temp_in.pdf")
+            ruta_salida_dir = os.path.join(temp_dir, "salida")
+            os.makedirs(ruta_salida_dir, exist_ok=True)
 
-        firma = pdf.cms.sign(
-            pdf_bytes,
-            metadatos_firma,
-            None,
-            None,
-            [],
-            "sha256",
-            hsm,
-        )
-        pdf_firmado = pdf_bytes + firma
+            with open(ruta_pdf_entrada, "wb") as archivo_pdf:
+                archivo_pdf.write(pdf_bytes)
+
+            comando = [
+                "java",
+                "-jar",
+                jar_path,
+                "-kst",
+                "WINDOWS-MY",
+                "-a",
+                "-d",
+                ruta_salida_dir,
+                ruta_pdf_entrada,
+            ]
+            resultado = subprocess.run(
+                comando,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            if resultado.returncode != 0:
+                detalle_error = (resultado.stderr or resultado.stdout or "").strip()
+                raise RuntimeError(
+                    "JSignPdf no pudo firmar el documento"
+                    + (f": {detalle_error}" if detalle_error else "")
+                )
+
+            ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_signed.pdf")
+            if not os.path.exists(ruta_pdf_firmado):
+                raise RuntimeError(
+                    "JSignPdf finalizó sin generar el archivo temp_in_signed.pdf"
+                )
+
+            with open(ruta_pdf_firmado, "rb") as archivo_firmado:
+                pdf_firmado = archivo_firmado.read()
 
         return {
             "pdf_firmado": base64.b64encode(pdf_firmado).decode("ascii"),
-            "dni_extraido": hsm.datos_identidad.get("dni"),
-            "nombre_firmante": hsm.datos_identidad.get("nombre_firmante"),
+            "dni_extraido": datos_identidad.get("dni"),
+            "nombre_firmante": datos_identidad.get("nombre"),
         }
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
@@ -140,34 +123,19 @@ def _decodificar_pdf(pdf_base64: str) -> bytes:
     return pdf_bytes
 
 
-def _extraer_datos_certificado(certificado_der):
-    certificado_x509 = x509.Certificate.load(certificado_der)
-    subject = certificado_x509.subject
-    subject_native = subject.native or {}
-    issuer = certificado_x509.issuer.native or {}
-
-    nombre_firmante = _primer_texto(subject_native.get("common_name"))
-    textos_prioritarios = [
-        subject_native.get("serial_number"),
-        subject_native.get("common_name"),
-        subject_native.get("dn_qualifier"),
-    ]
-    textos_generales = _extraer_textos(subject_native)
-    dni = _buscar_dni(textos_prioritarios) or _buscar_dni(textos_generales)
-
-    return {
-        "dni": dni,
-        "nombre_firmante": nombre_firmante,
-        "subject": subject.human_friendly,
-        "issuer": issuer,
-    }
-
-
 def _normalizar_dni(dni: str) -> str:
     dni_normalizado = re.sub(r"\D", "", str(dni or ""))
     if len(dni_normalizado) != 8:
         raise ValueError("Debe enviar un DNI esperado válido de 8 dígitos")
     return dni_normalizado
+
+
+def _normalizar_dni_certificado(valor) -> str | None:
+    for texto in _extraer_textos(valor):
+        coincidencia = PATRON_DNI.search(texto)
+        if coincidencia:
+            return coincidencia.group(1)
+    return None
 
 
 def _validar_identidad_dnie(datos_identidad: dict, dni_esperado: str):
@@ -176,14 +144,6 @@ def _validar_identidad_dnie(datos_identidad: dict, dni_esperado: str):
         raise PermissionError(MENSAJE_IDENTIDAD_FALLIDA)
     if not dni_extraido:
         raise RuntimeError("No se pudo extraer el DNI del certificado RENIEC")
-
-
-def _buscar_dni(textos) -> str | None:
-    for texto in _extraer_textos(textos):
-        coincidencia = PATRON_DNI.search(texto)
-        if coincidencia:
-            return coincidencia.group(1)
-    return None
 
 
 def _extraer_textos(valor):
@@ -207,28 +167,17 @@ def _primer_texto(valor):
     return textos[0] if textos else None
 
 
-def _es_error_pending_close(exc: pywintypes.error) -> bool:
-    winerror = getattr(exc, "winerror", None)
-    if winerror == CRYPT_E_PENDING_CLOSE:
-        return True
-
-    if exc.args and exc.args[0] == CRYPT_E_PENDING_CLOSE:
-        return True
-
-    return False
-
-
 def _describir_error_firma(exc: Exception) -> str:
     mensaje = str(exc)
     mensaje_mayusculas = mensaje.upper()
 
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
-    if "SCARD" in mensaje_mayusculas or "SMART CARD" in mensaje_mayusculas:
-        return "DNIe no insertado o lector no detectado"
-    if "PIN" in mensaje_mayusculas:
-        return "PIN incorrecto o cancelado por el usuario"
-    if "WINDOWS CAPI" in mensaje_mayusculas or "MSCAPI" in mensaje_mayusculas:
+    if "JAVA" in mensaje_mayusculas and "NOT FOUND" in mensaje_mayusculas:
+        return "Java no está instalado o no está disponible en el PATH"
+    if "JSIGNPDF" in mensaje_mayusculas:
+        return mensaje
+    if "WINDOWS CAPI" in mensaje_mayusculas or "WINDOWS-MY" in mensaje_mayusculas:
         return mensaje
 
     return mensaje or "No se pudo firmar el PDF"

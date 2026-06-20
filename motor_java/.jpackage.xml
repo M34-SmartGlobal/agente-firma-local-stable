@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+<jpackage-state version="21.0.10" platform="windows">
+  <app-version>3.0.1</app-version>
+  <main-launcher>JSignPdf</main-launcher>
+  <main-class>net.sf.jsignpdf.Signer</main-class>
+  <signed>false</signed>
+  <app-store>false</app-store>
+  <add-launcher name="JSignPdf-swing" shortcut="false" menu="true" service="false"></add-launcher>
+  <add-launcher name="JSignPdfC" shortcut="false" menu="true" service="false"></add-launcher>
+  <add-launcher name="InstallCert" shortcut="false" menu="true" service="false"></add-launcher></jpackage-state>
