@@ -56,6 +56,24 @@ def _comando_java():
     return java
 
 
+def _buscar_dll_pkcs11():
+    """Busca la DLL PKCS#11 del DNIe (OpenSC o Bit4id)."""
+    rutas = [
+        r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
+        r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\onepin-opensc-pkcs11.dll",
+        r"C:\Windows\System32\opensc-pkcs11.dll",
+        r"C:\Windows\System32\bit4xpki64.dll",
+        r"C:\Windows\System32\bit4xpki.dll",
+    ]
+    for ruta in rutas:
+        if os.path.exists(ruta):
+            return ruta
+    raise RuntimeError(
+        "No se encontró ninguna DLL PKCS#11. "
+        "Instale OpenSC o los drivers del DNIe."
+    )
+
+
 def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     if not pdf_base64:
         raise ValueError("Debe enviar el PDF en Base64")
@@ -68,6 +86,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     ruta_java = _comando_java()
     ruta_jar = os.path.join(BASE_DIR, "motor_java", "app", "JSignPdf.jar")
     ruta_installcert = os.path.join(BASE_DIR, "motor_java", "app", "InstallCert.jar")
+    ruta_dll = _buscar_dll_pkcs11()
 
     try:
         with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
@@ -80,6 +99,12 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
             ruta_pdf_normalizado = _normalizar_pdf(ruta_pdf_entrada)
 
+            # Config PKCS#11
+            ruta_pkcs11_cfg = os.path.join(temp_dir, "pkcs11.cfg")
+            with open(ruta_pkcs11_cfg, "w") as f:
+                f.write(f"name = OpenSC\n")
+                f.write(f"library = {ruta_dll.replace(chr(92), '/')}\n")
+
             comando = [
                 ruta_java,
                 "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11=ALL-UNNAMED",
@@ -91,10 +116,13 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 f"{ruta_jar};{ruta_installcert}",
                 "net.sf.jsignpdf.Signer",
                 "-kst",
-                "WINDOWS-MY",
-                "-a",
+                "PKCS11",
+                "-ksf",
+                ruta_pkcs11_cfg,
+                "-ksp",
+                "PASSWORD_PROMPT",
                 "-ha",
-                "SHA256",
+                "SHA512",
                 "-d",
                 ruta_salida_dir,
                 ruta_pdf_normalizado,
@@ -114,19 +142,17 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                     f"STDOUT: {(resultado.stdout or '').strip()}"
                 )
 
-            ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_norm_signed.pdf")
-            if not os.path.exists(ruta_pdf_firmado):
-                # Buscar cualquier .pdf firmado
-                posibles = [os.path.join(ruta_salida_dir, f) for f in os.listdir(ruta_salida_dir)]
-                pdfs = [f for f in posibles if f.endswith(".pdf")]
-                if pdfs:
-                    ruta_pdf_firmado = pdfs[0]
-                else:
-                    raise RuntimeError(
-                        "JSignPdf finalizó sin generar PDF firmado. "
-                        f"Contenido: {os.listdir(ruta_salida_dir)} "
-                        f"STDOUT: {(resultado.stdout or '').strip()}"
-                    )
+            # Buscar PDF firmado (cambia segun nombre del input)
+            posibles = [os.path.join(ruta_salida_dir, f) for f in os.listdir(ruta_salida_dir)]
+            pdfs = [f for f in posibles if f.endswith(".pdf")]
+            if pdfs:
+                ruta_pdf_firmado = pdfs[0]
+            else:
+                raise RuntimeError(
+                    "JSignPdf finalizó sin generar PDF firmado. "
+                    f"Contenido: {os.listdir(ruta_salida_dir)} "
+                    f"STDOUT: {(resultado.stdout or '').strip()}"
+                )
 
             with open(ruta_pdf_firmado, "rb") as archivo_firmado:
                 pdf_firmado = archivo_firmado.read()
