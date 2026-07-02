@@ -80,20 +80,24 @@ def _comando_java():
 
 
 def _buscar_dll_pkcs11():
-    """Busca la DLL PKCS#11 del DNIe (OpenSC o Bit4id)."""
+    """Busca la DLL PKCS#11 del DNIe (Bit4id tiene prioridad sobre OpenSC)."""
     rutas = [
+        # Bit4id (DLL oficial del DNIe peruano)
+        r"C:\Windows\System32\bit4xpki64.dll",
+        r"C:\Windows\System32\bit4xpki.dll",
+        r"C:\Program Files\Bit4id\bit4xpki.dll",
+        r"C:\Program Files (x86)\Bit4id\bit4xpki.dll",
+        # OpenSC (fallback)
         r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
         r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\onepin-opensc-pkcs11.dll",
         r"C:\Windows\System32\opensc-pkcs11.dll",
-        r"C:\Windows\System32\bit4xpki64.dll",
-        r"C:\Windows\System32\bit4xpki.dll",
     ]
     for ruta in rutas:
         if os.path.exists(ruta):
             return ruta
     raise RuntimeError(
         "No se encontró ninguna DLL PKCS#11. "
-        "Instale OpenSC o los drivers del DNIe."
+        "Instale los drivers del DNIe (Bit4id) u OpenSC."
     )
 
 
@@ -122,15 +126,14 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
             ruta_pdf_normalizado = _normalizar_pdf(ruta_pdf_entrada)
 
-            # Config PKCS#11
+            # Config PKCS#11 con Bit4id (DLL oficial DNIe) o fallback a OpenSC
+            nombre_dll = "bit4xpki" if "bit4xpki" in ruta_dll else "opensc"
             ruta_pkcs11_cfg = os.path.join(temp_dir, "pkcs11.cfg")
             with open(ruta_pkcs11_cfg, "w") as f:
-                f.write(f"name = OpenSC\n")
+                f.write(f"name = DNIe_{nombre_dll}\n")
                 f.write(f"library = {ruta_dll.replace(chr(92), '/')}\n")
-
-            override_security = os.path.join(
-                BASE_DIR, "motor_java", "app", "pkcs11_override.security"
-            )
+                # Intentar slot 0 primero; si falla, SunPKCS11 probara otros
+                f.write("slotListIndex = 0\n")
 
             comando = [
                 ruta_java,
@@ -139,13 +142,13 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 "--add-exports=java.base/sun.security.action=ALL-UNNAMED",
                 "--add-exports=java.base/sun.security.rsa=ALL-UNNAMED",
                 "--add-opens=java.base/sun.security.util=ALL-UNNAMED",
-                f"-Dpkcs11.cfg.path={ruta_pkcs11_cfg.replace(chr(92), '/')}",
-                f"-Djava.security.properties={override_security.replace(chr(92), '/')}",
                 "-cp",
                 f"{ruta_jar};{ruta_installcert}",
                 "net.sf.jsignpdf.Signer",
                 "-kst",
                 "PKCS11",
+                "-ksf",
+                ruta_pkcs11_cfg,
                 "-ksp",
                 "PASSWORD_PROMPT",
                 "-ha",
