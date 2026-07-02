@@ -49,8 +49,34 @@ def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
 
 def _comando_java():
-    # Usa java del PATH del sistema (Java 21+)
-    return "java"
+    import shutil
+    # 1. JAVA_HOME
+    jh = os.environ.get("JAVA_HOME") or os.environ.get("JDK_HOME")
+    if jh:
+        jbin = os.path.join(jh, "bin", "java.exe")
+        if os.path.exists(jbin):
+            return jbin
+    # 2. shutil.which (PATH del sistema)
+    java = shutil.which("java")
+    if java:
+        return java
+    # 3. Rutas tipicas de Oracle JDK 21
+    rutas = [
+        r"C:\Program Files\Java\jdk-21\bin\java.exe",
+        r"C:\Program Files\Java\jdk-21.0.10\bin\java.exe",
+        r"C:\Program Files\Java\jre-21.0.10\bin\java.exe",
+        r"C:\Program Files\Java\jdk-21.0.10+8\bin\java.exe",
+    ]
+    for r in rutas:
+        if os.path.exists(r):
+            return r
+    # 4. where java via cmd
+    try:
+        r = subprocess.run(["where", "java"], capture_output=True, text=True, timeout=3)
+        res = r.stdout.strip().splitlines()
+        return res[0] if res else "java"
+    except Exception:
+        return "java"
 
 
 def _buscar_dll_pkcs11():
