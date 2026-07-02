@@ -126,14 +126,17 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
             ruta_pdf_normalizado = _normalizar_pdf(ruta_pdf_entrada)
 
-            # Config PKCS#11 con Bit4id (DLL oficial DNIe) o fallback a OpenSC
+            # Config PKCS#11 con Bit4id (DLL oficial DNIe) o OpenSC como fallback
             nombre_dll = "bit4xpki" if "bit4xpki" in ruta_dll else "opensc"
             ruta_pkcs11_cfg = os.path.join(temp_dir, "pkcs11.cfg")
             with open(ruta_pkcs11_cfg, "w") as f:
-                f.write(f"name = DNIe_{nombre_dll}\n")
+                f.write(f"name = DNIe\n")
                 f.write(f"library = {ruta_dll.replace(chr(92), '/')}\n")
-                # Intentar slot 0 primero; si falla, SunPKCS11 probara otros
                 f.write("slotListIndex = 0\n")
+
+            override_security = os.path.join(
+                BASE_DIR, "motor_java", "app", "pkcs11_override.security"
+            )
 
             comando = [
                 ruta_java,
@@ -142,13 +145,13 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 "--add-exports=java.base/sun.security.action=ALL-UNNAMED",
                 "--add-exports=java.base/sun.security.rsa=ALL-UNNAMED",
                 "--add-opens=java.base/sun.security.util=ALL-UNNAMED",
+                f"-Dpkcs11.cfg.path={ruta_pkcs11_cfg.replace(chr(92), '/')}",
+                f"-Djava.security.properties={override_security.replace(chr(92), '/')}",
                 "-cp",
                 f"{ruta_jar};{ruta_installcert}",
                 "net.sf.jsignpdf.Signer",
                 "-kst",
                 "PKCS11",
-                "-ksf",
-                ruta_pkcs11_cfg,
                 "-ksp",
                 "PASSWORD_PROMPT",
                 "-ha",
