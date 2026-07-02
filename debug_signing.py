@@ -57,7 +57,7 @@ def main():
         "$raw = [System.Convert]::FromBase64String(\"" + test_data_b64 + "\")\n"
         "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
         "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
-        "Write-Output \"SIG:\" + [System.Convert]::ToBase64String($sig)\n"
+        "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
     )
 
     result = subprocess.run(
@@ -113,7 +113,7 @@ def main():
             "$hash = [System.Convert]::FromBase64String(\"" + hash_b64 + "\")\n"
             "$oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID(\"SHA256\")\n"
             f"$sig = $rsa.SignHash($hash, $oid)\n"
-            "Write-Output \"SIG:\" + [System.Convert]::ToBase64String($sig)\n"
+            "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
         )
 
         result2 = subprocess.run(

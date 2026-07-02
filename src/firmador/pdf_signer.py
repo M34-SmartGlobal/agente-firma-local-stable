@@ -89,7 +89,7 @@ def _sign_via_capi(thumbprint: str, data: bytes) -> bytes:
         "$raw = [System.Convert]::FromBase64String(\"" + data_b64 + "\")\n"
         "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
         "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
-        "Write-Output \"SIG:\" + [System.Convert]::ToBase64String($sig)\n"
+        "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
     )
 
     result = subprocess.run(
