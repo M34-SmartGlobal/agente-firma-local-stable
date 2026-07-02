@@ -1,85 +1,27 @@
 import base64
-import binascii
+import io
 import os
 import re
-import ssl
-import subprocess
 import tempfile
 
 import fitz
 from asn1crypto import x509
+from pyhanko.sign import signers
+from pyhanko.sign.fields import SigSeedSubFilter, SigFieldSpec
+from pyhanko.sign.pkcs11 import open_pkcs11_session, PKCS11Signer
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+from pkcs11 import TokenException
 
 
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MENSAJE_IDENTIDAD_FALLIDA = (
-    "Validación de identidad fallida. El DNIe insertado no pertenece al "
-    "usuario que inició sesión."
+    "Validaci\u00f3n de identidad fallida. El DNIe insertado no pertenece al "
+    "usuario que inici\u00f3 sesi\u00f3n."
 )
 
 
-def leer_certificado_dnie() -> dict:
-    try:
-        certificados = ssl.enum_certificates("MY")
-    except Exception as exc:
-        raise RuntimeError(f"Error al acceder a Windows CAPI: {str(exc)}") from exc
-
-    for cert_bytes, encoding, trust in certificados:
-        if encoding != "x509_asn":
-            continue
-
-        cert = x509.Certificate.load(cert_bytes)
-        issuer = cert.issuer.native
-
-        if "RENIEC" in str(issuer).upper():
-            subject = cert.subject.native
-            return {
-                "nombre": _primer_texto(subject.get("common_name")),
-                "dni": _normalizar_dni_certificado(subject.get("serial_number")),
-            }
-
-    raise RuntimeError(
-        "No se detectó el certificado de la RENIEC en el almacén de Windows. "
-        "Inserte el DNIe."
-    )
-
-
-def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
-    return firmar_documento(pdf_base64, pin, dni_esperado)
-
-
-def _comando_java():
-    import shutil
-    # 1. JAVA_HOME
-    jh = os.environ.get("JAVA_HOME") or os.environ.get("JDK_HOME")
-    if jh:
-        jbin = os.path.join(jh, "bin", "java.exe")
-        if os.path.exists(jbin):
-            return jbin
-    # 2. shutil.which (PATH del sistema)
-    java = shutil.which("java")
-    if java:
-        return java
-    # 3. Rutas tipicas de Oracle JDK 21
-    rutas = [
-        r"C:\Program Files\Java\jdk-21\bin\java.exe",
-        r"C:\Program Files\Java\jdk-21.0.10\bin\java.exe",
-        r"C:\Program Files\Java\jre-21.0.10\bin\java.exe",
-        r"C:\Program Files\Java\jdk-21.0.10+8\bin\java.exe",
-    ]
-    for r in rutas:
-        if os.path.exists(r):
-            return r
-    # 4. where java via cmd
-    try:
-        r = subprocess.run(["where", "java"], capture_output=True, text=True, timeout=3)
-        res = r.stdout.strip().splitlines()
-        return res[0] if res else "java"
-    except Exception:
-        return "java"
-
-
-def _buscar_dll_pkcs11():
+def _buscar_dll_pkcs11() -> str:
     """Busca la DLL PKCS#11 del DNIe (Bit4id tiene prioridad sobre OpenSC)."""
     rutas = [
         # Bit4id (DLL oficial del DNIe peruano)
@@ -96,9 +38,53 @@ def _buscar_dll_pkcs11():
         if os.path.exists(ruta):
             return ruta
     raise RuntimeError(
-        "No se encontró ninguna DLL PKCS#11. "
+        "No se encontr\u00f3 ninguna DLL PKCS#11. "
         "Instale los drivers del DNIe (Bit4id) u OpenSC."
     )
+
+
+def leer_certificado_dnie_pkcs11(pin: str) -> dict:
+    """Lee el certificado del DNIe directamente desde la tarjeta v\u00eda PKCS#11.
+    
+    Args:
+        pin: PIN del DNIe.
+    
+    Returns:
+        Dict con 'nombre', 'dni' del titular.
+    """
+    dll = _buscar_dll_pkcs11()
+    try:
+        with open_pkcs11_session(
+            lib_location=dll,
+            slot_no=0,
+            user_pin=pin,
+        ) as session:
+            certs = session.get_objects(
+                {session.token.classes.CERTIFICATE}
+            )
+            for cert_obj in certs:
+                raw = bytes(cert_obj.value)
+                cert = x509.Certificate.load(raw)
+                issuer = cert.issuer.native
+                subject = cert.subject.native
+                if "RENIEC" in str(issuer).upper():
+                    return {
+                        "nombre": _primer_texto(subject.get("common_name")),
+                        "dni": _normalizar_dni_certificado(
+                            subject.get("serial_number")
+                        ),
+                    }
+            raise RuntimeError(
+                "No se encontr\u00f3 certificado de la RENIEC en el DNIe."
+            )
+    except TokenException as e:
+        raise RuntimeError(
+            f"Error al acceder al DNIe v\u00eda PKCS#11: {str(e)}"
+        ) from e
+
+
+def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
+    return firmar_documento(pdf_base64, pin, dni_esperado)
 
 
 def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
@@ -106,141 +92,108 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
         raise ValueError("Debe enviar el PDF en Base64")
 
     dni_esperado = _normalizar_dni(dni_esperado)
-    datos_identidad = leer_certificado_dnie()
+
+    # Leer certificado desde PKCS#11 (no Windows CAPI)
+    datos_identidad = leer_certificado_dnie_pkcs11(pin)
     _validar_identidad_dnie(datos_identidad, dni_esperado)
 
     pdf_bytes = _decodificar_pdf(pdf_base64)
-    ruta_java = _comando_java()
-    ruta_jar = os.path.join(BASE_DIR, "motor_java", "app", "JSignPdf.jar")
-    ruta_installcert = os.path.join(BASE_DIR, "motor_java", "app", "InstallCert.jar")
-    ruta_dll = _buscar_dll_pkcs11()
+    dll = _buscar_dll_pkcs11()
 
     try:
         with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
             ruta_pdf_entrada = os.path.join(temp_dir, "temp_in.pdf")
-            ruta_salida_dir = os.path.join(temp_dir, "salida")
-            os.makedirs(ruta_salida_dir, exist_ok=True)
+            ruta_pdf_normalizado = os.path.join(temp_dir, "temp_in_norm.pdf")
+            ruta_pdf_firmado = os.path.join(temp_dir, "temp_in_firmado.pdf")
 
-            with open(ruta_pdf_entrada, "wb") as archivo_pdf:
-                archivo_pdf.write(pdf_bytes)
+            with open(ruta_pdf_entrada, "wb") as f:
+                f.write(pdf_bytes)
 
-            ruta_pdf_normalizado = _normalizar_pdf(ruta_pdf_entrada)
+            # Normalizar PDF a v1.7
+            _normalizar_pdf(ruta_pdf_entrada, ruta_pdf_normalizado)
 
-            # Config PKCS#11 con Bit4id (DLL oficial DNIe) o OpenSC como fallback
-            nombre_dll = "bit4xpki" if "bit4xpki" in ruta_dll else "opensc"
-            ruta_pkcs11_cfg = os.path.join(temp_dir, "pkcs11.cfg")
-            with open(ruta_pkcs11_cfg, "w") as f:
-                f.write(f"name = DNIe\n")
-                f.write(f"library = {ruta_dll.replace(chr(92), '/')}\n")
-                f.write("slotListIndex = 0\n")
-
-            override_security = os.path.join(
-                BASE_DIR, "motor_java", "app", "pkcs11_override.security"
-            )
-
-            comando = [
-                ruta_java,
-                "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11=ALL-UNNAMED",
-                "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED",
-                "--add-exports=java.base/sun.security.action=ALL-UNNAMED",
-                "--add-exports=java.base/sun.security.rsa=ALL-UNNAMED",
-                "--add-opens=java.base/sun.security.util=ALL-UNNAMED",
-                f"-Dpkcs11.cfg.path={ruta_pkcs11_cfg.replace(chr(92), '/')}",
-                f"-Djava.security.properties={override_security.replace(chr(92), '/')}",
-                "-cp",
-                f"{ruta_jar};{ruta_installcert}",
-                "net.sf.jsignpdf.Signer",
-                "-kst",
-                "PKCS11",
-                "-ksp",
-                pin,
-                "-a",
-                "-ha",
-                "SHA512",
-                "-d",
-                ruta_salida_dir,
-                ruta_pdf_normalizado,
-            ]
-            resultado = subprocess.run(
-                comando,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-            if resultado.returncode != 0:
-                raise RuntimeError(
-                    "JSignPdf no pudo firmar el documento. "
-                    f"Código de salida: {resultado.returncode}. "
-                    f"STDERR: {(resultado.stderr or '').strip()} "
-                    f"STDOUT: {(resultado.stdout or '').strip()}"
+            # Firmar con pyHanko + python-pkcs11 (Bit4id)
+            with open_pkcs11_session(
+                lib_location=dll,
+                slot_no=0,
+                user_pin=pin,
+            ) as session:
+                signer = PKCS11Signer(
+                    pkcs11_session=session,
+                    cert_label=None,  # auto-detect
+                    key_label=None,   # auto-detect
+                    prefer_pss=False,
                 )
 
-            # Buscar PDF firmado (cambia segun nombre del input)
-            posibles = [os.path.join(ruta_salida_dir, f) for f in os.listdir(ruta_salida_dir)]
-            pdfs = [f for f in posibles if f.endswith(".pdf")]
-            if pdfs:
-                ruta_pdf_firmado = pdfs[0]
-            else:
-                raise RuntimeError(
-                    "JSignPdf finalizó sin generar PDF firmado. "
-                    f"Contenido: {os.listdir(ruta_salida_dir)} "
-                    f"STDOUT: {(resultado.stdout or '').strip()}"
-                )
+                with open(ruta_pdf_normalizado, "rb") as f:
+                    w = IncrementalPdfFileWriter(f)
+                    signers.sign_pdf(
+                        w,
+                        signature_meta=signers.PdfSignatureMetadata(
+                            field_name="Signature1",
+                            subfilter=SigSeedSubFilter.PADES,
+                            reason="Firma digital con DNIe",
+                        ),
+                        signer=signer,
+                        output=ruta_pdf_firmado,
+                    )
 
-            with open(ruta_pdf_firmado, "rb") as archivo_firmado:
-                pdf_firmado = archivo_firmado.read()
+            with open(ruta_pdf_firmado, "rb") as f:
+                pdf_firmado = f.read()
 
         return {
             "pdf_firmado": base64.b64encode(pdf_firmado).decode("ascii"),
             "dni_extraido": datos_identidad.get("dni"),
             "nombre_firmante": datos_identidad.get("nombre"),
         }
+    except TokenException as e:
+        raise RuntimeError(
+            f"Error con la tarjeta DNIe: {str(e)}. "
+            "Verifique que el DNIe est\u00e9 insertado y el PIN sea correcto."
+        ) from e
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
 
 
-def _normalizar_pdf(ruta_entrada):
-    doc = fitz.open(ruta_entrada)
-    ruta_salida = ruta_entrada.replace(".pdf", "_norm.pdf")
+# ---------------------------------------------------------------------------
+# Funciones auxiliares
+# ---------------------------------------------------------------------------
 
-    nuevo_doc = fitz.open()
-    nuevo_doc.insert_pdf(doc)
-
-    nuevo_doc.pdf_version = "1.7"
-    nuevo_doc.save(ruta_salida, garbage=4, deflate=True, clean=True)
-
-    doc.close()
-    nuevo_doc.close()
-
-    return ruta_salida
+def _normalizar_pdf(ruta_entrada: str, ruta_salida: str):
+    """Convierte PDF a versi\u00f3n 1.7 (necesario para firmas digitales)."""
+    with fitz.open(ruta_entrada) as doc:
+        doc.save(
+            ruta_salida,
+            pdf_version="1.7",
+            garbage=4,
+            deflate=True,
+            clean=True,
+        )
 
 
 def _decodificar_pdf(pdf_base64: str) -> bytes:
-    contenido = pdf_base64.split(",", 1)[1] if "," in pdf_base64 else pdf_base64
     try:
-        pdf_bytes = base64.b64decode(contenido, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError("El PDF recibido no es Base64 válido") from exc
-
-    if not pdf_bytes.startswith(b"%PDF"):
-        raise ValueError("El archivo recibido no parece ser un PDF válido")
-    return pdf_bytes
+        return base64.b64decode(pdf_base64)
+    except (binascii.Error, ValueError, TypeError) as e:
+        raise ValueError(f"PDF en Base64 inv\u00e1lido: {str(e)}") from e
 
 
 def _normalizar_dni(dni: str) -> str:
-    dni_normalizado = re.sub(r"\D", "", str(dni or ""))
-    if len(dni_normalizado) != 8:
-        raise ValueError("Debe enviar un DNI esperado válido de 8 dígitos")
-    return dni_normalizado
+    if not dni:
+        return dni
+    solo_numeros = re.sub(r"\D", "", str(dni))
+    if solo_numeros and len(solo_numeros) >= 8:
+        return solo_numeros[:8]
+    return dni
 
 
 def _normalizar_dni_certificado(valor) -> str | None:
-    for texto in _extraer_textos(valor):
-        coincidencia = PATRON_DNI.search(texto)
-        if coincidencia:
-            return coincidencia.group(1)
-    return None
+    if valor is None:
+        return None
+    textos = _extraer_textos(valor)
+    if not textos:
+        return None
+    return _normalizar_dni(textos[0])
 
 
 def _validar_identidad_dnie(datos_identidad: dict, dni_esperado: str):
@@ -278,11 +231,8 @@ def _describir_error_firma(exc: Exception) -> str:
 
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
-    # NOTA: NO usar heuristicas con "JAVA" y "NOT FOUND" porque errores como
-    # "java.security.KeyStoreException: PKCS11 not found" activan el falso positivo
-    if "JSIGNPDF" in mensaje_mayusculas:
-        return mensaje
-    if "WINDOWS CAPI" in mensaje_mayusculas or "WINDOWS-MY" in mensaje_mayusculas:
-        return mensaje
-
+    if "PIN" in mensaje_mayusculas and ("INCORRECTO" in mensaje_mayusculas or "INVALID" in mensaje_mayusculas):
+        return "PIN del DNIe incorrecto. Verifique e intente nuevamente."
+    if "TOKEN" in mensaje_mayusculas and "NOT RECOGNIZED" in mensaje_mayusculas:
+        return "El DNIe no es reconocido. Verifique la inserci\u00f3n y los drivers."
     return mensaje or "No se pudo firmar el PDF"
