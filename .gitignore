@@ -5,3 +5,4 @@ build/
 dist/
 *.spec
 .env
+motor_java/jre/

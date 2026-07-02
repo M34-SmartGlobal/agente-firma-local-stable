@@ -49,11 +49,8 @@ def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
 
 def _comando_java():
-    java = os.path.join(BASE_DIR, "motor_java", "jre", "bin", "java.exe")
-    if not os.path.exists(java):
-        # Fallback: java en PATH
-        java = "java"
-    return java
+    # Usa java del PATH del sistema (Java 21+)
+    return "java"
 
 
 def _buscar_dll_pkcs11():
