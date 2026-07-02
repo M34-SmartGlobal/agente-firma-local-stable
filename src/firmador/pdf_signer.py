@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 import tempfile
-import asyncio
+
 
 import fitz
 from asn1crypto import x509
@@ -157,25 +157,18 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
             with open(ruta_pdf_normalizado, "rb") as f:
                 w = IncrementalPdfFileWriter(f)
 
-                # pyHanko necesita event loop para async
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    with open(ruta_pdf_firmado, "wb") as pdf_out:
-                        loop.run_until_complete(
-                            signers.sign_pdf(
-                                w,
-                                signature_meta=signers.PdfSignatureMetadata(
-                                    field_name="Signature1",
-                                    subfilter=SigSeedSubFilter.PADES,
-                                    reason="Firma digital con DNIe",
-                                ),
-                                signer=signer,
-                                output=pdf_out,
-                            )
-                        )
-                finally:
-                    loop.close()
+                with open(ruta_pdf_firmado, "wb") as pdf_out:
+                    # sign_pdf ya maneja asyncio.run() internamente
+                    signers.sign_pdf(
+                        w,
+                        signature_meta=signers.PdfSignatureMetadata(
+                            field_name="Signature1",
+                            subfilter=SigSeedSubFilter.PADES,
+                            reason="Firma digital con DNIe",
+                        ),
+                        signer=signer,
+                        output=pdf_out,
+                    )
 
             with open(ruta_pdf_firmado, "rb") as f:
                 pdf_firmado = f.read()
