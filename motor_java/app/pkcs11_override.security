@@ -1,2 +1,0 @@
-# Override: registra SunPKCS11 con config dinamica apuntando a Bit4id/OpenSC
-security.provider.10=SunPKCS11 ${pkcs11.cfg.path}

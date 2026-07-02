@@ -1,16 +1,15 @@
 import base64
-import binascii
 import os
 import re
+import subprocess
 import tempfile
+import asyncio
 
 import fitz
 from asn1crypto import x509
 from pyhanko.sign import signers
 from pyhanko.sign.fields import SigSeedSubFilter
-from pyhanko.sign.pkcs11 import open_pkcs11_session, PKCS11Signer
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-import pkcs11.exceptions as pkcs11_err
 
 
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
@@ -21,66 +20,99 @@ MENSAJE_IDENTIDAD_FALLIDA = (
 )
 
 
-def _buscar_dll_pkcs11() -> str:
-    """Busca la DLL PKCS#11 del DNIe (Bit4id tiene prioridad sobre OpenSC)."""
-    rutas = [
-        # Bit4id (DLL oficial del DNIe peruano)
-        r"C:\Windows\System32\bit4xpki64.dll",
-        r"C:\Windows\System32\bit4xpki.dll",
-        r"C:\Program Files\Bit4id\bit4xpki.dll",
-        r"C:\Program Files (x86)\Bit4id\bit4xpki.dll",
-        # OpenSC (fallback)
-        r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll",
-        r"C:\Program Files\OpenSC Project\OpenSC\pkcs11\onepin-opensc-pkcs11.dll",
-        r"C:\Windows\System32\opensc-pkcs11.dll",
-    ]
-    for ruta in rutas:
-        if os.path.exists(ruta):
-            return ruta
+def leer_certificado_dnie() -> dict:
+    """Lee el certificado del DNIe desde Windows CAPI."""
+    import ssl
+
+    try:
+        certificados = ssl.enum_certificates("MY")
+    except Exception as e:
+        raise RuntimeError(f"Error al acceder a Windows CAPI: {str(e)}") from e
+
+    for cert_bytes, encoding, trust in certificados:
+        if encoding == "x509_asn":
+            cert = x509.Certificate.load(cert_bytes)
+            issuer = cert.issuer.native
+
+            if "RENIEC" in str(issuer).upper():
+                subject = cert.subject.native
+                return {
+                    "nombre": _primer_texto(subject.get("common_name")),
+                    "dni": _normalizar_dni_certificado(
+                        subject.get("serial_number")
+                    ),
+                    "thumbprint": cert.sha1.hex().upper(),
+                    "cert_bytes": cert_bytes,
+                }
+
     raise RuntimeError(
-        "No se encontró ninguna DLL PKCS#11. "
-        "Instale los drivers del DNIe (Bit4id) u OpenSC."
+        "No se detectó el certificado de la RENIEC en el almacén de Windows. "
+        "Inserte el DNIe."
     )
 
 
-def leer_certificado_dnie_pkcs11(pin: str) -> dict:
-    """Lee el certificado del DNIe directamente desde la tarjeta vía PKCS#11.
+def _sign_via_capi(thumbprint: str, data: bytes) -> bytes:
+    """Firma datos usando Windows CAPI vía PowerShell + RSACryptoServiceProvider.
     
-    Args:
-        pin: PIN del DNIe.
-    
-    Returns:
-        Dict con 'nombre', 'dni' del titular.
+    Esta es la función clave: usa CAPI nativo de Windows (no CNG, no Java).
     """
-    dll = _buscar_dll_pkcs11()
-    try:
-        with open_pkcs11_session(
-            lib_location=dll,
-            slot_no=0,
-            user_pin=pin,
-        ) as session:
-            certs = session.get_objects(
-                {session.token.classes.CERTIFICATE}
-            )
-            for cert_obj in certs:
-                raw = bytes(cert_obj.value)
-                cert = x509.Certificate.load(raw)
-                issuer = cert.issuer.native
-                subject = cert.subject.native
-                if "RENIEC" in str(issuer).upper():
-                    return {
-                        "nombre": _primer_texto(subject.get("common_name")),
-                        "dni": _normalizar_dni_certificado(
-                            subject.get("serial_number")
-                        ),
-                    }
-            raise RuntimeError(
-                "No se encontró certificado de la RENIEC en el DNIe."
-            )
-    except pkcs11_err.PKCS11Error as e:
+    import hashlib
+
+    hash_data = hashlib.sha256(data).digest()
+    hash_b64 = base64.b64encode(hash_data).decode()
+
+    # Script PowerShell para firmar con RSACryptoServiceProvider (CAPI nativo)
+    ps = (
+        "$cert = Get-Item \"Cert:\\CurrentUser\\My\\" + thumbprint + "\"\n"
+        "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
+        "$hash = [System.Convert]::FromBase64String(\"" + hash_b64 + "\")\n"
+        "$oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID(\"SHA256\")\n"
+        "$sig = $rsa.SignHash($hash, $oid)\n"
+        "Write-Output \"SIG:\" + [System.Convert]::ToBase64String($sig)\n"
+    )
+
+    result = subprocess.run(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    if result.returncode != 0:
         raise RuntimeError(
-            f"Error al acceder al DNIe vía PKCS#11: {str(e)}"
-        ) from e
+            f"PowerShell CAPI signing failed: {result.stderr.strip()}"
+        )
+
+    for line in result.stdout.splitlines():
+        if line.startswith("SIG:"):
+            return base64.b64decode(line[4:])
+
+    raise RuntimeError(
+        f"No signature in PowerShell output: {result.stdout[:200]}"
+    )
+
+
+class WindowsCAPISigner(signers.Signer):
+    """Signer que usa Windows CAPI (RSACryptoServiceProvider) para firmar.
+    
+    Ejecuta PowerShell internamente para acceder a la CSP del DNIe.
+    """
+
+    def __init__(self, thumbprint: str, cert_bytes: bytes):
+        self._thumbprint = thumbprint
+        self._cert = x509.Certificate.load(cert_bytes)
+
+    @property
+    def signing_cert(self):
+        return self._cert
+
+    async def async_sign_raw(
+        self, data: bytes, digest_algorithm: str = "sha256", dry_run: bool = False
+    ) -> bytes:
+        if dry_run:
+            # Devolver firma dummy para estimación de tamaño
+            return b"\x00" * 256
+        return _sign_via_capi(self._thumbprint, data)
 
 
 def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
@@ -93,12 +125,13 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
     dni_esperado = _normalizar_dni(dni_esperado)
 
-    # Leer certificado desde PKCS#11 (no Windows CAPI)
-    datos_identidad = leer_certificado_dnie_pkcs11(pin)
+    # Leer certificado desde Windows CAPI (funciona)
+    datos_identidad = leer_certificado_dnie()
     _validar_identidad_dnie(datos_identidad, dni_esperado)
 
     pdf_bytes = _decodificar_pdf(pdf_base64)
-    dll = _buscar_dll_pkcs11()
+    thumbprint = datos_identidad["thumbprint"]
+    cert_bytes = datos_identidad["cert_bytes"]
 
     try:
         with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
@@ -112,31 +145,30 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
             # Normalizar PDF a v1.7
             _normalizar_pdf(ruta_pdf_entrada, ruta_pdf_normalizado)
 
-            # Firmar con pyHanko + python-pkcs11 (Bit4id)
-            with open_pkcs11_session(
-                lib_location=dll,
-                slot_no=0,
-                user_pin=pin,
-            ) as session:
-                signer = PKCS11Signer(
-                    pkcs11_session=session,
-                    cert_label=None,  # auto-detect
-                    key_label=None,  # auto-detect
-                    prefer_pss=False,
-                )
+            # Crear signer CAPI y firmar con pyHanko
+            signer = WindowsCAPISigner(thumbprint, cert_bytes)
 
-                with open(ruta_pdf_normalizado, "rb") as f:
-                    w = IncrementalPdfFileWriter(f)
-                    signers.sign_pdf(
-                        w,
-                        signature_meta=signers.PdfSignatureMetadata(
-                            field_name="Signature1",
-                            subfilter=SigSeedSubFilter.PADES,
-                            reason="Firma digital con DNIe",
-                        ),
-                        signer=signer,
-                        output=ruta_pdf_firmado,
+            with open(ruta_pdf_normalizado, "rb") as f:
+                w = IncrementalPdfFileWriter(f)
+
+                # pyHanko necesita event loop para async
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(
+                        signers.sign_pdf(
+                            w,
+                            signature_meta=signers.PdfSignatureMetadata(
+                                field_name="Signature1",
+                                subfilter=SigSeedSubFilter.PADES,
+                                reason="Firma digital con DNIe",
+                            ),
+                            signer=signer,
+                            output=ruta_pdf_firmado,
+                        )
                     )
+                finally:
+                    loop.close()
 
             with open(ruta_pdf_firmado, "rb") as f:
                 pdf_firmado = f.read()
@@ -146,11 +178,6 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
             "dni_extraido": datos_identidad.get("dni"),
             "nombre_firmante": datos_identidad.get("nombre"),
         }
-    except pkcs11_err.PKCS11Error as e:
-        raise RuntimeError(
-            f"Error con la tarjeta DNIe: {str(e)}. "
-            "Verifique que el DNIe esté insertado y el PIN sea correcto."
-        ) from e
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
 
@@ -158,6 +185,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 # ---------------------------------------------------------------------------
 # Funciones auxiliares
 # ---------------------------------------------------------------------------
+
 
 def _normalizar_pdf(ruta_entrada: str, ruta_salida: str):
     """Convierte PDF a versión 1.7 (necesario para firmas digitales)."""
@@ -228,7 +256,6 @@ def _primer_texto(valor):
 def _describir_error_firma(exc: Exception) -> str:
     mensaje = str(exc)
     mensaje_mayusculas = mensaje.upper()
-
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
     return mensaje or "No se pudo firmar el PDF"
