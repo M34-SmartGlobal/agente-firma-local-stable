@@ -76,40 +76,84 @@ def leer_certificado_dnie() -> dict:
 
 
 def _sign_via_capi(thumbprint: str, data: bytes) -> bytes:
-    """Firma datos usando Windows CAPI vía PowerShell + RSACryptoServiceProvider.
+    """Firma datos usando Windows CAPI vía Java SunMSCAPI (preferido) o PowerShell.
     
-    Pasa los datos RAW a PowerShell y usa SignData (hashing + DigestInfo interno).
+    Java SunMSCAPI usa CAPI nativo y maneja el PIN del DNIe.
     """
     data_b64 = base64.b64encode(data).decode()
 
-    # Script PowerShell: SignData maneja hashing y DigestInfo automáticamente
+    # ---- Estrategia 1: Java SunMSCAPI ----
+    # Buscar java en rutas típicas
+    java_candidates = [
+        "java",
+        r"C:\Program Files\Eclipse Adoptium\jdk-21.0.6.13-hotspot\bin\java",
+        r"C:\Program Files\Eclipse Adoptium\jre-21.0.6.13-hotspot\bin\java",
+        r"C:\Program Files\Java\jre-1.8\bin\java",
+    ]
+    signer_jar = os.path.join(BASE_DIR, "motor_java", "signer", "CAPISigner.class")
+    signer_dir = os.path.dirname(signer_jar)
+
+    for java_exe in java_candidates:
+        try:
+            result = subprocess.run(
+                [java_exe, "-cp", signer_dir, "-Djdk.crypto.mscapi.useSunMSCAPI=true",
+                 "-Djava.library.path=",
+                 "CAPISigner", thumbprint, data_b64],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if line.startswith("SIG:"):
+                        sig = base64.b64decode(line[4:])
+                        if len(sig) == 256:
+                            return sig
+                        print(f"  [DEBUG] Java signature size: {len(sig)}, expected 256")
+                        return sig
+                # SIG not found, try next java candidate
+                continue
+            # If we got here with a Java-not-found error, try next candidate
+            err = result.stderr.lower()
+            if "not found" in err or "cannot find" in err or "no such file" in err:
+                continue
+        except FileNotFoundError:
+            continue
+
+    # ---- Estrategia 2: PowerShell fallback (puede requerir PIN manual) ----
+    # Usa Get-Item (Cert: drive) o X509Store como alternativa
     ps = (
-        "$cert = Get-Item -Path Cert:\\CurrentUser\\My\\" + thumbprint + "\n"
-        "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
-        "$raw = [System.Convert]::FromBase64String(\"" + data_b64 + "\")\n"
-        "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
-        "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
-        'Write-Output ("SIG:" + [System.Convert]::ToBase64String($sig))' + "\n"
+        '$cert = Get-Item -Path "Cert:\CurrentUser\My\"' + thumbprint + '" 2>$null;'
+        'if (-not $cert) {'
+        '$store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My","CurrentUser");'
+        '$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly);'
+        '$certs = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,"'
+        + thumbprint + '",$false);'
+        'if ($certs.Count -gt 0) { $cert = $certs[0] };'
+        '$store.Close() };'
+        '$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey;'
+        'if (-not $rsa) { Write-Error "PrivateKey NULL"; exit 1 };'
+        '$raw = [System.Convert]::FromBase64String("' + data_b64 + '");'
+        '$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256,'
+        '[System.Security.Cryptography.RSASignaturePadding]::Pkcs1);'
+        'Write-Output ("SIG:" + [System.Convert]::ToBase64String($sig))'
     )
 
     result = subprocess.run(
         ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps],
-        capture_output=True,
-        text=True,
-        timeout=30,
+        capture_output=True, text=True, timeout=30,
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"PowerShell CAPI signing failed: {result.stderr.strip()}"
-        )
-
-    for line in result.stdout.splitlines():
-        if line.startswith("SIG:"):
-            return base64.b64decode(line[4:])
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("SIG:"):
+                sig = base64.b64decode(line[4:])
+                if len(sig) > 0:
+                    return sig
 
     raise RuntimeError(
-        f"No signature in PowerShell output: {result.stdout[:200]}"
+        "No se pudo firmar con Windows CAPI. "
+        "Asegúrese de que Java 21 esté instalado (Eclipse Adoptium)\n"
+        f"  stderr: {result.stderr.strip()}"
+        f"  stdout: {result.stdout[:300]}"
     )
 
 
