@@ -190,13 +190,13 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 def _normalizar_pdf(ruta_entrada: str, ruta_salida: str):
     """Convierte PDF a versión 1.7 (necesario para firmas digitales)."""
     with fitz.open(ruta_entrada) as doc:
-        doc.save(
-            ruta_salida,
-            pdf_version="1.7",
-            garbage=4,
-            deflate=True,
-            clean=True,
-        )
+        doc.save(ruta_salida, garbage=4, deflate=True, clean=True)
+    # Forzar versión 1.7 en el header del PDF
+    with open(ruta_salida, "rb") as f:
+        content = f.read()
+    content = re.sub(rb"%PDF-\d\.\d", b"%PDF-1.7", content, count=1)
+    with open(ruta_salida, "wb") as f:
+        f.write(content)
 
 
 def _decodificar_pdf(pdf_base64: str) -> bytes:
