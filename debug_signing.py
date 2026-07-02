@@ -8,9 +8,9 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from asn1crypto import x509, core
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes, serialization
+from asn1crypto import x509
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives import hashes
 from cryptography.x509 import load_der_x509_certificate
 from cryptography.hazmat.backends import default_backend
 
@@ -18,13 +18,9 @@ import ssl
 
 
 def _make_ps_script(thumbprint, data_b64):
-    """Genera script PowerShell que carga cert y firma usando API .NET directa."""
+    """Genera script PowerShell que firma usando Get-Item."""
     return (
-        '$store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")\n'
-        "$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)\n"
-        '$cert = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, "'
-        + thumbprint + '", $false)[0]\n'
-        "$store.Close()\n"
+        '$cert = Get-Item -Path "Cert:\\CurrentUser\\My\\' + thumbprint + '"\n'
         "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
         '$raw = [System.Convert]::FromBase64String("' + data_b64 + '")\n'
         "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
@@ -107,45 +103,6 @@ def main():
     except Exception as e:
         print(f"\n❌ VERIFICACIÓN FALLÓ: {e}")
         print("   El problema está en el SIGNING (PowerShell/CAPI)")
-
-        # Intentar con SignHash como alternativa
-        import hashlib
-        hash_data = hashlib.sha256(test_data).digest()
-        hash_b64 = base64.b64encode(hash_data).decode()
-
-        ps2 = _make_ps_script(thumbprint, test_data_b64)
-        # Reemplazar SignData con SignHash
-        ps2 = ps2.replace(
-            "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
-            "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)",
-            "$hash = [System.Convert]::FromBase64String(\"" + hash_b64 + "\")\n"
-            "$oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID(\"SHA256\")\n"
-            "$sig = $rsa.SignHash($hash, $oid)"
-        )
-
-        result2 = subprocess.run(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps2],
-            capture_output=True, text=True, timeout=30,
-        )
-
-        if result2.returncode != 0:
-            print(f"\n  SignHash también falló: {result2.stderr}")
-        else:
-            for line in result2.stdout.splitlines():
-                if line.startswith("SIG:"):
-                    sig_bytes2 = base64.b64decode(line[4:])
-                    print(f"\n  SignHash: tamaño={len(sig_bytes2)} bytes")
-
-                    try:
-                        pub_key.verify(
-                            sig_bytes2,
-                            test_data,
-                            padding.PKCS1v15(),
-                            hashes.SHA256(),
-                        )
-                        print("  ✅ SignHash verifica correctamente!")
-                    except Exception as e2:
-                        print(f"  ❌ SignHash también falla: {e2}")
 
 
 if __name__ == "__main__":

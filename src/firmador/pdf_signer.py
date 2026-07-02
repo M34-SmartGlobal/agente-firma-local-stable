@@ -84,15 +84,12 @@ def _sign_via_capi(thumbprint: str, data: bytes) -> bytes:
 
     # Script PowerShell: SignData maneja hashing y DigestInfo automáticamente
     ps = (
-        "$store = New-Object System.Security.Cryptography.X509Certificates.X509Store(\"My\", \"CurrentUser\")\n"
-        "$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)\n"
-        "$cert = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, \"" + thumbprint + "\", $false)[0]\n"
-        "$store.Close()\n"
+        "$cert = Get-Item -Path Cert:\\CurrentUser\\My\\" + thumbprint + "\n"
         "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
         "$raw = [System.Convert]::FromBase64String(\"" + data_b64 + "\")\n"
         "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
         "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
-        "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
+        'Write-Output ("SIG:" + [System.Convert]::ToBase64String($sig))' + "\n"
     )
 
     result = subprocess.run(
