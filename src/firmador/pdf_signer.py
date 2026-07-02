@@ -47,6 +47,14 @@ def firmar_pdf(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     return firmar_documento(pdf_base64, pin, dni_esperado)
 
 
+def _comando_java():
+    java = os.path.join(BASE_DIR, "motor_java", "jre", "bin", "java.exe")
+    if not os.path.exists(java):
+        # Fallback: java en PATH
+        java = "java"
+    return java
+
+
 def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     if not pdf_base64:
         raise ValueError("Debe enviar el PDF en Base64")
@@ -56,11 +64,9 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
     _validar_identidad_dnie(datos_identidad, dni_esperado)
 
     pdf_bytes = _decodificar_pdf(pdf_base64)
-    ruta_ejecutable = os.path.join(BASE_DIR, "motor_java", "JSignPdfC.exe")
-    if not os.path.exists(ruta_ejecutable):
-        raise FileNotFoundError(
-            f"No se encontró el ejecutable nativo de firma: {ruta_ejecutable}"
-        )
+    ruta_java = _comando_java()
+    ruta_jar = os.path.join(BASE_DIR, "motor_java", "app", "JSignPdf.jar")
+    ruta_installcert = os.path.join(BASE_DIR, "motor_java", "app", "InstallCert.jar")
 
     try:
         with tempfile.TemporaryDirectory(prefix="firma_dnie_") as temp_dir:
@@ -72,7 +78,15 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 archivo_pdf.write(pdf_bytes)
 
             comando = [
-                ruta_ejecutable,
+                ruta_java,
+                "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11=ALL-UNNAMED",
+                "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED",
+                "--add-exports=java.base/sun.security.action=ALL-UNNAMED",
+                "--add-exports=java.base/sun.security.rsa=ALL-UNNAMED",
+                "--add-opens=java.base/sun.security.util=ALL-UNNAMED",
+                "-cp",
+                f"{ruta_jar};{ruta_installcert}",
+                "net.sf.jsignpdf.Signer",
                 "-kst",
                 "WINDOWS-MY",
                 "-a",
@@ -99,11 +113,17 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 
             ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_signed.pdf")
             if not os.path.exists(ruta_pdf_firmado):
-                raise RuntimeError(
-                    "JSignPdf finalizó sin generar el archivo temp_in_signed.pdf. "
-                    f"STDERR: {(resultado.stderr or '').strip()} "
-                    f"STDOUT: {(resultado.stdout or '').strip()}"
-                )
+                # El JAR puede nombrar distinto; buscar cualquier .pdf firmado
+                posibles = [os.path.join(ruta_salida_dir, f) for f in os.listdir(ruta_salida_dir)]
+                pdfs = [f for f in posibles if f.endswith(".pdf")]
+                if pdfs:
+                    ruta_pdf_firmado = pdfs[0]
+                else:
+                    raise RuntimeError(
+                        "JSignPdf finalizó sin generar PDF firmado. "
+                        f"Contenido: {os.listdir(ruta_salida_dir)} "
+                        f"STDOUT: {(resultado.stdout or '').strip()}"
+                    )
 
             with open(ruta_pdf_firmado, "rb") as archivo_firmado:
                 pdf_firmado = archivo_firmado.read()
