@@ -101,6 +101,12 @@ class WindowsCAPISigner(signers.Signer):
     def __init__(self, thumbprint: str, cert_bytes: bytes):
         self._thumbprint = thumbprint
         self._cert = x509.Certificate.load(cert_bytes)
+        super().__init__(
+            signature_mechanism=None,  # auto-detect
+            prefer_pss=False,
+            embed_roots=True,
+            signing_cert=self._cert,
+        )
 
     @property
     def signing_cert(self):
