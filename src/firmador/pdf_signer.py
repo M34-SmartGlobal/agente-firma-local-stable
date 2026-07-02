@@ -161,18 +161,19 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(
-                        signers.sign_pdf(
-                            w,
-                            signature_meta=signers.PdfSignatureMetadata(
-                                field_name="Signature1",
-                                subfilter=SigSeedSubFilter.PADES,
-                                reason="Firma digital con DNIe",
-                            ),
-                            signer=signer,
-                            output=ruta_pdf_firmado,
+                    with open(ruta_pdf_firmado, "wb") as pdf_out:
+                        loop.run_until_complete(
+                            signers.sign_pdf(
+                                w,
+                                signature_meta=signers.PdfSignatureMetadata(
+                                    field_name="Signature1",
+                                    subfilter=SigSeedSubFilter.PADES,
+                                    reason="Firma digital con DNIe",
+                                ),
+                                signer=signer,
+                                output=pdf_out,
+                            )
                         )
-                    )
                 finally:
                     loop.close()
 
