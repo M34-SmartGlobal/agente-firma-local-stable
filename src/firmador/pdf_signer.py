@@ -21,7 +21,12 @@ MENSAJE_IDENTIDAD_FALLIDA = (
 
 
 def leer_certificado_dnie() -> dict:
-    """Lee el certificado del DNIe desde Windows CAPI."""
+    """Lee el certificado FIR del DNIe desde Windows CAPI.
+    
+    El DNIe tiene 2 certificados:
+    - CIF (Identificación): keyUsage = digitalSignature
+    - FIR (Firma): keyUsage = nonRepudiation  <-- este necesitamos
+    """
     import ssl
 
     try:
@@ -29,21 +34,40 @@ def leer_certificado_dnie() -> dict:
     except Exception as e:
         raise RuntimeError(f"Error al acceder a Windows CAPI: {str(e)}") from e
 
-    for cert_bytes, encoding, trust in certificados:
-        if encoding == "x509_asn":
-            cert = x509.Certificate.load(cert_bytes)
-            issuer = cert.issuer.native
+    fir_cert = None
+    ci_cert = None
 
-            if "RENIEC" in str(issuer).upper():
-                subject = cert.subject.native
-                return {
-                    "nombre": _primer_texto(subject.get("common_name")),
-                    "dni": _normalizar_dni_certificado(
-                        subject.get("serial_number")
-                    ),
-                    "thumbprint": cert.sha1.hex().upper(),
-                    "cert_bytes": cert_bytes,
-                }
+    for cert_bytes, encoding, trust in certificados:
+        if encoding != "x509_asn":
+            continue
+        cert = x509.Certificate.load(cert_bytes)
+        issuer = cert.issuer.native
+
+        if "RENIEC" not in str(issuer).upper():
+            continue
+
+        subject = cert.subject.native
+        nombre = str(subject.get("common_name", "")).upper()
+        datos = {
+            "nombre": _primer_texto(subject.get("common_name")),
+            "dni": _normalizar_dni_certificado(
+                subject.get("serial_number")
+            ),
+            "thumbprint": cert.sha1.hex().upper(),
+            "cert_bytes": cert_bytes,
+        }
+
+        # FIR = Firma (nonRepudiation), CIF = Identificación
+        if "FIR" in nombre:
+            fir_cert = datos
+        else:
+            ci_cert = datos
+
+    # Priorizar FIR sobre CIF
+    if fir_cert:
+        return fir_cert
+    if ci_cert:
+        return ci_cert
 
     raise RuntimeError(
         "No se detectó el certificado de la RENIEC en el almacén de Windows. "
