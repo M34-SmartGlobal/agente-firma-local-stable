@@ -1,0 +1,2 @@
+# Override para registrar SunPKCS11 con config dinamica
+security.provider.10=SunPKCS11 ${pkcs11.cfg.path}
