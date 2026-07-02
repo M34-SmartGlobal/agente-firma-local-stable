@@ -271,8 +271,8 @@ def _describir_error_firma(exc: Exception) -> str:
 
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
-    if "JAVA" in mensaje_mayusculas and "NOT FOUND" in mensaje_mayusculas:
-        return "Java no está instalado o no está disponible en el PATH"
+    # NOTA: NO usar heuristicas con "JAVA" y "NOT FOUND" porque errores como
+    # "java.security.KeyStoreException: PKCS11 not found" activan el falso positivo
     if "JSIGNPDF" in mensaje_mayusculas:
         return mensaje
     if "WINDOWS CAPI" in mensaje_mayusculas or "WINDOWS-MY" in mensaje_mayusculas:
