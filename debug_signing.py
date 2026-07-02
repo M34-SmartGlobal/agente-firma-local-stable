@@ -17,6 +17,22 @@ from cryptography.hazmat.backends import default_backend
 import ssl
 
 
+def _make_ps_script(thumbprint, data_b64):
+    """Genera script PowerShell que carga cert y firma usando API .NET directa."""
+    return (
+        '$store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My", "CurrentUser")\n'
+        "$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)\n"
+        '$cert = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, "'
+        + thumbprint + '", $false)[0]\n'
+        "$store.Close()\n"
+        "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
+        '$raw = [System.Convert]::FromBase64String("' + data_b64 + '")\n'
+        "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
+        "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
+        'Write-Output ("SIG:" + [System.Convert]::ToBase64String($sig))\n'
+    )
+
+
 def main():
     # 1. Leer certificado FIR
     cert_found = None
@@ -51,14 +67,7 @@ def main():
     test_data_b64 = base64.b64encode(test_data).decode()
 
     # 4. Firmar vía PowerShell
-    ps = (
-        "$cert = Get-Item \"Cert:\\CurrentUser\\My\\" + thumbprint + "\"\n"
-        "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
-        "$raw = [System.Convert]::FromBase64String(\"" + test_data_b64 + "\")\n"
-        "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
-        "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
-        "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
-    )
+    ps = _make_ps_script(thumbprint, test_data_b64)
 
     result = subprocess.run(
         ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps],
@@ -82,7 +91,7 @@ def main():
         return
 
     print(f"\nFirma generada:")
-    print(f"  Tamaño: {len(sig_bytes)} bytes")
+    print(f"  Tamaño: {len(sig_bytes)} bytes (debe ser 256)")
     print(f"  Hex (primeros 32): {sig_bytes[:32].hex()}")
 
     # 5. Verificar la firma
@@ -99,21 +108,19 @@ def main():
         print(f"\n❌ VERIFICACIÓN FALLÓ: {e}")
         print("   El problema está en el SIGNING (PowerShell/CAPI)")
 
-        # Intentar con diferentes formatos
-        print("\n--- Intentando alternativas ---")
-
-        # Probar con RSACryptoServiceProvider.SignHash
+        # Intentar con SignHash como alternativa
         import hashlib
         hash_data = hashlib.sha256(test_data).digest()
         hash_b64 = base64.b64encode(hash_data).decode()
 
-        ps2 = (
-            "$cert = Get-Item \"Cert:\\CurrentUser\\My\\" + thumbprint + "\"\n"
-            "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
+        ps2 = _make_ps_script(thumbprint, test_data_b64)
+        # Reemplazar SignData con SignHash
+        ps2 = ps2.replace(
+            "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
+            "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)",
             "$hash = [System.Convert]::FromBase64String(\"" + hash_b64 + "\")\n"
             "$oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID(\"SHA256\")\n"
-            f"$sig = $rsa.SignHash($hash, $oid)\n"
-            "Write-Output (\"SIG:\" + [System.Convert]::ToBase64String($sig))\n"
+            "$sig = $rsa.SignHash($hash, $oid)"
         )
 
         result2 = subprocess.run(
@@ -121,7 +128,9 @@ def main():
             capture_output=True, text=True, timeout=30,
         )
 
-        if result2.returncode == 0:
+        if result2.returncode != 0:
+            print(f"\n  SignHash también falló: {result2.stderr}")
+        else:
             for line in result2.stdout.splitlines():
                 if line.startswith("SIG:"):
                     sig_bytes2 = base64.b64decode(line[4:])
@@ -137,6 +146,7 @@ def main():
                         print("  ✅ SignHash verifica correctamente!")
                     except Exception as e2:
                         print(f"  ❌ SignHash también falla: {e2}")
+
 
 if __name__ == "__main__":
     main()
