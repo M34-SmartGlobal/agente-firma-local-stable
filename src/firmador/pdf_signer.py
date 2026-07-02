@@ -6,6 +6,7 @@ import ssl
 import subprocess
 import tempfile
 
+import fitz
 from asn1crypto import x509
 
 
@@ -77,6 +78,8 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
             with open(ruta_pdf_entrada, "wb") as archivo_pdf:
                 archivo_pdf.write(pdf_bytes)
 
+            ruta_pdf_normalizado = _normalizar_pdf(ruta_pdf_entrada)
+
             comando = [
                 ruta_java,
                 "--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11=ALL-UNNAMED",
@@ -94,7 +97,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 "SHA256",
                 "-d",
                 ruta_salida_dir,
-                ruta_pdf_entrada,
+                ruta_pdf_normalizado,
             ]
             resultado = subprocess.run(
                 comando,
@@ -111,9 +114,9 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                     f"STDOUT: {(resultado.stdout or '').strip()}"
                 )
 
-            ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_signed.pdf")
+            ruta_pdf_firmado = os.path.join(ruta_salida_dir, "temp_in_norm_signed.pdf")
             if not os.path.exists(ruta_pdf_firmado):
-                # El JAR puede nombrar distinto; buscar cualquier .pdf firmado
+                # Buscar cualquier .pdf firmado
                 posibles = [os.path.join(ruta_salida_dir, f) for f in os.listdir(ruta_salida_dir)]
                 pdfs = [f for f in posibles if f.endswith(".pdf")]
                 if pdfs:
@@ -135,6 +138,22 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
         }
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
+
+
+def _normalizar_pdf(ruta_entrada):
+    doc = fitz.open(ruta_entrada)
+    ruta_salida = ruta_entrada.replace(".pdf", "_norm.pdf")
+
+    nuevo_doc = fitz.open()
+    nuevo_doc.insert_pdf(doc)
+
+    nuevo_doc.pdf_version = "1.7"
+    nuevo_doc.save(ruta_salida, garbage=4, deflate=True, clean=True)
+
+    doc.close()
+    nuevo_doc.close()
+
+    return ruta_salida
 
 
 def _decodificar_pdf(pdf_base64: str) -> bytes:
