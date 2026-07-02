@@ -168,6 +168,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                         ),
                         signer=signer,
                         output=pdf_out,
+                        existing_fields_only=False,
                     )
 
             with open(ruta_pdf_firmado, "rb") as f:
