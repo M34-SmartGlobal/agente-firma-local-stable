@@ -1,5 +1,5 @@
 import base64
-import io
+import binascii
 import os
 import re
 import tempfile
@@ -7,17 +7,17 @@ import tempfile
 import fitz
 from asn1crypto import x509
 from pyhanko.sign import signers
-from pyhanko.sign.fields import SigSeedSubFilter, SigFieldSpec
+from pyhanko.sign.fields import SigSeedSubFilter
 from pyhanko.sign.pkcs11 import open_pkcs11_session, PKCS11Signer
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-from pkcs11 import TokenException
+import pkcs11.exceptions as pkcs11_err
 
 
 PATRON_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MENSAJE_IDENTIDAD_FALLIDA = (
-    "Validaci\u00f3n de identidad fallida. El DNIe insertado no pertenece al "
-    "usuario que inici\u00f3 sesi\u00f3n."
+    "Validación de identidad fallida. El DNIe insertado no pertenece al "
+    "usuario que inició sesión."
 )
 
 
@@ -38,13 +38,13 @@ def _buscar_dll_pkcs11() -> str:
         if os.path.exists(ruta):
             return ruta
     raise RuntimeError(
-        "No se encontr\u00f3 ninguna DLL PKCS#11. "
+        "No se encontró ninguna DLL PKCS#11. "
         "Instale los drivers del DNIe (Bit4id) u OpenSC."
     )
 
 
 def leer_certificado_dnie_pkcs11(pin: str) -> dict:
-    """Lee el certificado del DNIe directamente desde la tarjeta v\u00eda PKCS#11.
+    """Lee el certificado del DNIe directamente desde la tarjeta vía PKCS#11.
     
     Args:
         pin: PIN del DNIe.
@@ -75,11 +75,11 @@ def leer_certificado_dnie_pkcs11(pin: str) -> dict:
                         ),
                     }
             raise RuntimeError(
-                "No se encontr\u00f3 certificado de la RENIEC en el DNIe."
+                "No se encontró certificado de la RENIEC en el DNIe."
             )
-    except TokenException as e:
+    except pkcs11_err.PKCS11Error as e:
         raise RuntimeError(
-            f"Error al acceder al DNIe v\u00eda PKCS#11: {str(e)}"
+            f"Error al acceder al DNIe vía PKCS#11: {str(e)}"
         ) from e
 
 
@@ -121,7 +121,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
                 signer = PKCS11Signer(
                     pkcs11_session=session,
                     cert_label=None,  # auto-detect
-                    key_label=None,   # auto-detect
+                    key_label=None,  # auto-detect
                     prefer_pss=False,
                 )
 
@@ -146,10 +146,10 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
             "dni_extraido": datos_identidad.get("dni"),
             "nombre_firmante": datos_identidad.get("nombre"),
         }
-    except TokenException as e:
+    except pkcs11_err.PKCS11Error as e:
         raise RuntimeError(
             f"Error con la tarjeta DNIe: {str(e)}. "
-            "Verifique que el DNIe est\u00e9 insertado y el PIN sea correcto."
+            "Verifique que el DNIe esté insertado y el PIN sea correcto."
         ) from e
     except Exception as exc:
         raise RuntimeError(_describir_error_firma(exc)) from exc
@@ -160,7 +160,7 @@ def firmar_documento(pdf_base64: str, pin: str, dni_esperado: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _normalizar_pdf(ruta_entrada: str, ruta_salida: str):
-    """Convierte PDF a versi\u00f3n 1.7 (necesario para firmas digitales)."""
+    """Convierte PDF a versión 1.7 (necesario para firmas digitales)."""
     with fitz.open(ruta_entrada) as doc:
         doc.save(
             ruta_salida,
@@ -175,7 +175,7 @@ def _decodificar_pdf(pdf_base64: str) -> bytes:
     try:
         return base64.b64decode(pdf_base64)
     except (binascii.Error, ValueError, TypeError) as e:
-        raise ValueError(f"PDF en Base64 inv\u00e1lido: {str(e)}") from e
+        raise ValueError(f"PDF en Base64 inválido: {str(e)}") from e
 
 
 def _normalizar_dni(dni: str) -> str:
@@ -231,8 +231,4 @@ def _describir_error_firma(exc: Exception) -> str:
 
     if MENSAJE_IDENTIDAD_FALLIDA.upper() in mensaje_mayusculas:
         return MENSAJE_IDENTIDAD_FALLIDA
-    if "PIN" in mensaje_mayusculas and ("INCORRECTO" in mensaje_mayusculas or "INVALID" in mensaje_mayusculas):
-        return "PIN del DNIe incorrecto. Verifique e intente nuevamente."
-    if "TOKEN" in mensaje_mayusculas and "NOT RECOGNIZED" in mensaje_mayusculas:
-        return "El DNIe no es reconocido. Verifique la inserci\u00f3n y los drivers."
     return mensaje or "No se pudo firmar el PDF"
