@@ -78,20 +78,17 @@ def leer_certificado_dnie() -> dict:
 def _sign_via_capi(thumbprint: str, data: bytes) -> bytes:
     """Firma datos usando Windows CAPI vía PowerShell + RSACryptoServiceProvider.
     
-    Esta es la función clave: usa CAPI nativo de Windows (no CNG, no Java).
+    Pasa los datos RAW a PowerShell y usa SignData (hashing + DigestInfo interno).
     """
-    import hashlib
+    data_b64 = base64.b64encode(data).decode()
 
-    hash_data = hashlib.sha256(data).digest()
-    hash_b64 = base64.b64encode(hash_data).decode()
-
-    # Script PowerShell para firmar con RSACryptoServiceProvider (CAPI nativo)
+    # Script PowerShell: SignData maneja hashing y DigestInfo automáticamente
     ps = (
         "$cert = Get-Item \"Cert:\\CurrentUser\\My\\" + thumbprint + "\"\n"
         "$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]$cert.PrivateKey\n"
-        "$hash = [System.Convert]::FromBase64String(\"" + hash_b64 + "\")\n"
-        "$oid = [System.Security.Cryptography.CryptoConfig]::MapNameToOID(\"SHA256\")\n"
-        "$sig = $rsa.SignHash($hash, $oid)\n"
+        "$raw = [System.Convert]::FromBase64String(\"" + data_b64 + "\")\n"
+        "$sig = $rsa.SignData($raw, [System.Security.Cryptography.HashAlgorithmName]::SHA256, "
+        "[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)\n"
         "Write-Output \"SIG:\" + [System.Convert]::ToBase64String($sig)\n"
     )
 
